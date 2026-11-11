@@ -1,7 +1,9 @@
 import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
+import { MemoryRouter } from "react-router";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
+import { SessionTimeline } from "../SessionTimeline";
 import type {
   SessionTimelineData,
   SessionTimelineSpan,
@@ -204,5 +206,40 @@ describe("Session Token usage", () => {
     );
     expect(container.textContent).toContain("無資料");
     expect(container.textContent).toContain("用量來源互相矛盾");
+  });
+
+  it("updates the operation's token details when selected from the timeline", () => {
+    const session = data([
+      model("first", {
+        "llm.token_count.prompt": 100,
+        "llm.token_count.completion": 20,
+      }),
+      model("second", {
+        "llm.token_count.prompt": 200,
+        "llm.token_count.completion": 30,
+      }),
+    ]);
+    session.operations = session.operations.map((operation, index) => ({
+      ...operation,
+      summary: index === 0 ? "第一次模型呼叫" : "第二次模型呼叫",
+    }));
+    act(() =>
+      root.render(
+        <MemoryRouter>
+          <SessionTimeline data={session} />
+        </MemoryRouter>
+      )
+    );
+    expect(
+      container.querySelector('[aria-label="Session Token"]')?.textContent
+    ).toContain("350");
+    const button = [...container.querySelectorAll("button")].find((el) =>
+      el.textContent?.includes("第二次模型呼叫")
+    );
+    expect(button).toBeDefined();
+    act(() => button?.click());
+    expect(
+      container.querySelector('[aria-label="操作 Token"]')?.textContent
+    ).toContain("230");
   });
 });
