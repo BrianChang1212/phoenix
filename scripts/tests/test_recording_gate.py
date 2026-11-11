@@ -854,6 +854,71 @@ class RecordingHttpTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(codex_status.json()["state"], "incomplete")
                 self.assertEqual(kiro_status.json()["state"], "incomplete")
                 self.assertEqual(kiro_status.json()["persisted_spans"], 2)
+
+                next_start = await self.client.post(
+                    "/v1/recordings/start",
+                    json=dict(
+                        asdict(KIRO_OWNER),
+                        task="Kiro second capture",
+                        request_id=str(uuid4()),
+                    ),
+                )
+                self.assertEqual(next_start.status_code, 200, next_start.text)
+                next_capture = next_start.json()["capture_id"]
+                success_event = str(uuid4())
+                await self.send(
+                    kiro_batch(
+                        KIRO_OWNER.conversation_id,
+                        next_capture,
+                        26,
+                        event_id=success_event,
+                    )
+                )
+                for _ in range(100):
+                    async with db() as session:
+                        rows = list(await session.scalars(select(models.Span)))
+                    if len(rows) >= 4:
+                        break
+                    await asyncio.sleep(0.02)
+                self.assertEqual(len(rows), 4)
+
+                next_stop = await self.client.post(
+                    "/v1/recordings/stop",
+                    json=dict(
+                        asdict(KIRO_OWNER),
+                        capture_id=next_capture,
+                        observed_event_ids=[success_event],
+                        manifest_complete=True,
+                    ),
+                )
+                self.assertEqual(next_stop.status_code, 200, next_stop.text)
+                next_deadline = next_stop.json()["drain_deadline_ns"]
+                gate.tick(now_ns=next_deadline)
+                self.assertTrue(gate.begin_readback(next_capture))
+                next_result = await read_recording_spans(
+                    db,
+                    capture_id=next_capture,
+                    expected_span_keys=set(gate.expected_span_keys(next_capture)),
+                )
+                next_final = gate.complete_drain(next_capture, next_result)
+                self.assertEqual(next_final.state, "observed")
+                self.assertEqual(next_final.storage, "verified")
+                self.assertEqual(next_final.persisted_spans, 1)
+                self.assertIsNotNone(next_final.timeline_url)
+
+                next_status = await self.client.post(
+                    "/v1/recordings/status",
+                    json=dict(asdict(KIRO_OWNER), capture_id=next_capture),
+                )
+                self.assertEqual(next_status.status_code, 200, next_status.text)
+                self.assertEqual(next_status.json()["state"], "observed")
+                self.assertNotEqual(next_capture, kiro_capture)
+
+                async with db() as session:
+                    session_ids = list(await session.scalars(select(models.ProjectSession.session_id)))
+                self.assertCountEqual(
+                    session_ids, [codex_capture, kiro_capture, next_capture]
+                )
         finally:
             await engine.dispose()
 
