@@ -32,10 +32,12 @@ Windows worktree 共用套件 junction 時，native pnpm 自動重建曾破壞�
 
 ```powershell
 python scripts/serve-session-frontend.py --server-dir <artifact-root> --check
-python scripts/serve-session-frontend.py --server-dir <artifact-root> -- serve --port 6007 --grpc-port 4318 --read-only
+python scripts/serve-session-frontend.py --server-dir <artifact-root> -- serve --port 6007 --grpc-port 4318
 ```
 
 `<artifact-root>/static/.vite/manifest.json` 必須有 JavaScript 入口與完整本機 assets。檢查模式不 import Phoenix、不啟動服務；執行模式只在同一程序中替換 `phoenix.server.app.SERVER_DIR`。安裝版模板、全域 config、venv 與資料庫均不由此腳本修改。由啟動環境明確指定 loopback、獨立工作目錄、資料快照、外部資源與遙測限制，並使用既有 process guard 管理及停止測試服務。正式切換前完成獨立 review 與隔離頁面驗證；復原時停止客製程序，沿用原啟動入口。
+
+2026-11-11 隔離執行查核發現，安裝版的 `--read-only` 會連 GET 一起停用 REST API，與本時間軸資料來源不相容。隔離驗證採獨立 SQLite backup 快照、停用 migrations 的一般模式，不連原資料庫；不可因一般模式可用就省略資料隔離。
 
 ## 瀏覽器驗證工具
 
@@ -43,7 +45,7 @@ python scripts/serve-session-frontend.py --server-dir <artifact-root> -- serve -
 node js/app/scripts/verify-session-timeline.mjs --base-url http://127.0.0.1:6007 --output-dir <new-evidence-directory>
 ```
 
-工具只接受 loopback HTTP，使用專案 Playwright 與已安裝 Edge，預設選取已知非機密的 Codex／Kiro 驗證 Session。它從 Sessions 列表與 Source 選單進入 Timeline，比對所選操作的原始 span 連結與耗時，驗證暫停／恢復、選取保留，以及來源有資料時的輪次／平行操作。輸出桌面、窄視窗截圖及 `verification.json`；不輸出原始模型輸入或工具內容。輸出目錄必須為空，不覆寫既有證據。截圖是實際 runtime 驗證的產物，只有腳本語法通過不能視為頁面通過。
+工具只接受 loopback HTTP，使用專案 Playwright 與已安裝 Edge，預設選取已知驗證用途的 Codex／Kiro Session。它從 Sessions 列表與 Source 選單進入 Timeline，比對所選操作的原始 span 連結與耗時，並以可見用量來源比對原始 span Token；驗證鍵盤選取、暫停／恢復、選取保留，以及來源有資料時的輪次／平行操作。另對所選 Session GET 注入一次 503，確認舊畫面與時間保留，移除攔截後確認恢復；這是受控瀏覽器故障，不修改資料庫。最後實際導航原始 Trace 並返回。輸出桌面、窄視窗截圖及 `verification.json`；不輸出原始模型輸入或工具內容。輸出目錄必須為空，不覆寫既有證據。截圖是實際 runtime 驗證的產物，只有腳本語法通過不能視為頁面通過。
 
 可用 `--project`、`--session-id`、`--source codex|kiro` 指定其他已授權的驗證資料。測試結束會關閉本工具開啟的瀏覽器；服務生命週期仍由呼叫端的 process guard 管理。
 
