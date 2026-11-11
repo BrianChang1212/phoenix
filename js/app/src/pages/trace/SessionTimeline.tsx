@@ -1,11 +1,10 @@
 import { css } from "@emotion/react";
-import { useEffect, useState } from "react";
+import { useState, type ReactNode } from "react";
 import { Link } from "react-router";
 
-import {
-  loadSessionTimeline,
-  type SessionOperation,
-  type SessionTimelineData,
+import type {
+  SessionOperation,
+  SessionTimelineData,
 } from "./sessionTimelineData";
 import {
   buildTimelineDuration,
@@ -14,6 +13,7 @@ import {
   type TimelineSegment,
 } from "./sessionTimelineDuration";
 import { OperationTokenUsage, SessionTokenSummary } from "./SessionTokenUsage";
+import { useSessionTimelineRefresh } from "./useSessionTimelineRefresh";
 
 const timelineCSS = css`
   padding: 24px;
@@ -327,12 +327,25 @@ function resolveTimelineSelection({
   };
 }
 
-export function SessionTimeline({ data }: { data: SessionTimelineData }) {
+function useObservationTime(snapshotObservedAt?: number) {
+  const [initialObservedAt] = useState(() => Date.now());
+  return snapshotObservedAt ?? initialObservedAt;
+}
+
+export function SessionTimeline({
+  data,
+  observedAt: snapshotObservedAt,
+  refreshControls,
+}: {
+  data: SessionTimelineData;
+  observedAt?: number;
+  refreshControls?: ReactNode;
+}) {
   const [selection, setSelection] = useState<TimelineSelection>(null);
   const [search, setSearch] = useState("");
   const [source, setSource] = useState("all");
   const [selectedTurnId, setSelectedTurnId] = useState<string | null>(null);
-  const [observedAt] = useState(() => Date.now());
+  const observedAt = useObservationTime(snapshotObservedAt);
   const turns = [
     ...new Set(
       data.operations.flatMap((operation) =>
@@ -373,6 +386,7 @@ export function SessionTimeline({ data }: { data: SessionTimelineData }) {
   return (
     <section css={timelineCSS} aria-label="Session 操作時間軸">
       <h2>操作時間軸</h2>
+      {refreshControls}
       <SessionTokenSummary data={data} turnId={effectiveTurnId} />
       <div className="timeline-overview">
         <svg
@@ -501,7 +515,11 @@ export function SessionTimeline({ data }: { data: SessionTimelineData }) {
         <p role="status">沒有操作資料</p>
       ) : (
         <>
-          <div className="timeline-scroll">
+          <div
+            className="timeline-scroll"
+            role="region"
+            aria-label="時間軸捲動區"
+          >
             <div className="timeline-ruler">
               {[0, 1, 2, 3, 4].map((tick) => (
                 <span key={tick}>
@@ -550,7 +568,7 @@ export function SessionTimeline({ data }: { data: SessionTimelineData }) {
                         kind: "segment",
                         startTime: segment.startTime,
                       });
-                      setFocusedParallelId(null);
+                      setFocusedParallelId(filtered[0]?.id ?? null);
                     }}
                   >
                     <OperationIcon kind={isParallel ? "mixed" : segment.kind} />
@@ -703,43 +721,54 @@ export function SessionTimelineView({ sessionId }: { sessionId: string }) {
 }
 
 function SessionTimelineLoader({ sessionId }: { sessionId: string }) {
-  const [state, setState] = useState<
-    | { kind: "loading" }
-    | { kind: "loaded"; data: SessionTimelineData }
-    | { kind: "error"; message: string }
-  >({ kind: "loading" });
-  const [attempt, setAttempt] = useState(0);
-  useEffect(() => {
-    const controller = new AbortController();
-    loadSessionTimeline({ sessionId, signal: controller.signal }).then(
-      (data) => {
-        if (!controller.signal.aborted) setState({ kind: "loaded", data });
-      },
-      (error: unknown) => {
-        if (!controller.signal.aborted)
-          setState({
-            kind: "error",
-            message: error instanceof Error ? error.message : "讀取失敗",
-          });
-      }
+  const { state, mode, toggleMode, retry } = useSessionTimelineRefresh({
+    sessionId,
+  });
+  const controls = (
+    <>
+      <div className="timeline-controls" aria-label="時間軸更新控制">
+        <button type="button" onClick={toggleMode}>
+          {mode === "live" ? "暫停更新" : "恢復更新"}
+        </button>
+        <span className="timeline-muted">
+          {mode === "live" ? "自動更新 · 每 5 秒" : "已暫停"}
+        </span>
+        {state.kind === "ready" && (
+          <time
+            className="timeline-muted"
+            dateTime={new Date(state.snapshot.observedAt).toISOString()}
+          >
+            上次更新 {new Date(state.snapshot.observedAt).toLocaleTimeString()}
+          </time>
+        )}
+      </div>
+      {state.kind === "ready" && state.refreshError !== null && (
+        <p role="alert">
+          更新失敗，保留上次資料（可能過期）：{state.refreshError}{" "}
+          <button type="button" onClick={retry} disabled={mode === "paused"}>
+            重試
+          </button>
+        </p>
+      )}
+    </>
+  );
+  if (state.kind === "ready") {
+    return (
+      <SessionTimeline
+        data={state.snapshot.data}
+        observedAt={state.snapshot.observedAt}
+        refreshControls={controls}
+      />
     );
-    return () => controller.abort();
-  }, [sessionId, attempt]);
-  if (state.kind === "loaded")
-    return <SessionTimeline key={sessionId} data={state.data} />;
+  }
   return (
     <section css={timelineCSS}>
+      {controls}
       <p role={state.kind === "error" ? "alert" : "status"}>
         {state.kind === "loading" ? "讀取操作資料…" : state.message}
       </p>
       {state.kind === "error" && (
-        <button
-          type="button"
-          onClick={() => {
-            setState({ kind: "loading" });
-            setAttempt((value) => value + 1);
-          }}
-        >
+        <button type="button" onClick={retry} disabled={mode === "paused"}>
           重試
         </button>
       )}
