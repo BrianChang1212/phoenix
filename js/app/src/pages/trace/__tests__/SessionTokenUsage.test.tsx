@@ -142,6 +142,32 @@ describe("Session Token usage", () => {
     expect(container.textContent).toContain("操作 Token120");
   });
 
+  it("withholds a cumulative session total when a model cannot be assigned to a turn", () => {
+    const cumulative = {
+      ...model("turn-total", {
+        "turn.id": "turn-one",
+        "codex.turn.token_usage.input_tokens": 80,
+        "codex.turn.token_usage.output_tokens": 20,
+      }),
+      name: "session_task.turn",
+      span_kind: "UNKNOWN",
+    };
+    const orphan = model("unassigned-model", {
+      "llm.token_count.prompt": 80,
+      "llm.token_count.completion": 20,
+    });
+    orphan.parent_id = "missing-parent";
+    const session = data([cumulative, orphan]);
+    act(() => root.render(<SessionTokenSummary data={session} />));
+    expect(container.textContent).toContain("無資料");
+    expect(container.textContent).toContain("部分模型無法歸屬輪次");
+    expect(container.querySelector('[role="img"]')).toBeNull();
+    const operation = session.operations[0];
+    if (!operation) throw new Error("fixture requires a model");
+    act(() => root.render(<OperationTokenUsage operation={operation} />));
+    expect(container.textContent).toContain("操作 Token100");
+  });
+
   it("distinguishes absent Kiro usage, genuine zero, and a tool's inapplicability", () => {
     act(() =>
       root.render(
