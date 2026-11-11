@@ -68,7 +68,7 @@ class TestProjectSession:
             await session.flush()
 
         assert await self._node(
-            "recordingMetadata { task source }", project_session, httpx_client
+            "recordingMetadata{ task source }", project_session, httpx_client
         ) == {"task": "Inspect sessions table", "source": "codex"}
 
     @pytest.fixture
