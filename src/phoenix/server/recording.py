@@ -1,5 +1,3 @@
-"""Bounded, process-local admission for explicitly recorded conversations."""
-
 import json
 import os
 import sqlite3
@@ -97,8 +95,6 @@ class _Capture:
 
 
 class _RecordingLedger:
-    """Persist bounded receipt metadata and span identities, never raw spans."""
-
     _SCHEMA_VERSION = 3
 
     def __init__(self, path: Path, binding_id: Optional[str]) -> None:
@@ -267,7 +263,6 @@ class _RecordingLedger:
     def save_admissions(
         self, captures: Iterable[_Capture], span_keys: dict[str, set[tuple[bytes, bytes]]]
     ) -> None:
-        """Durably commit one OTLP request's identities and receipts atomically."""
         with self._db:
             for capture in captures:
                 self._save_capture(capture)
@@ -767,8 +762,6 @@ class RecordingGate:
                 del scope.spans[:]
                 scope.spans.extend(kept)
         if self._ledger and dirty_captures:
-            # Persist capture state and admitted identities before returning spans
-            # to the gRPC receiver for enqueueing.
             self._ledger.save_admissions(dirty_captures.values(), admitted_keys)
         return output
 

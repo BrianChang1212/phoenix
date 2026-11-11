@@ -1,5 +1,3 @@
-"""Verify recording span keys against Phoenix's primary database."""
-
 from dataclasses import dataclass
 from typing import Literal, Optional
 
@@ -31,7 +29,6 @@ def _provenance_matches(attributes: object, capture_id: str) -> bool:
     session = attributes.get("session")
     recording_id = recording.get("capture_id") if isinstance(recording, dict) else None
     session_id = session.get("id") if isinstance(session, dict) else None
-    # Preserve compatibility with a Phoenix adapter that has not unflattened dotted keys.
     recording_id = recording_id or attributes.get("recording.capture_id")
     session_id = session_id or attributes.get("session.id")
     return recording_id == capture_id and session_id == capture_id
@@ -97,8 +94,6 @@ async def read_recording_spans(
                 key = (trace_id, span_id)
                 if key not in expected or not _provenance_matches(attributes, capture_id):
                     continue
-                # The joins and session filter prove all valid rows belong to the same project
-                # and session. Preserve those exact rows for Relay ID construction below.
                 project_rowid = project_id
                 session_rowid = session_id
                 persisted.add(key)
