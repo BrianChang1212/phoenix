@@ -679,13 +679,35 @@ class RecordingHttpTests(unittest.IsolatedAsyncioTestCase):
                         list(await session.scalars(select(models.ProjectSession.session_id))),
                         [capture],
                     )
-                await self.client.post(
+                stopped = await self.client.post(
                     "/v1/recordings/stop",
                     json=dict(
                         asdict(OWNER),
                         capture_id=capture,
                     ),
                 )
+                self.assertEqual(stopped.status_code, 200, stopped.text)
+                gate = self.app.state.recording_gate
+                deadline = stopped.json()["drain_deadline_ns"]
+                gate.tick(now_ns=deadline)
+                self.assertTrue(gate.begin_readback(capture))
+                result = await read_recording_spans(
+                    db,
+                    capture_id=capture,
+                    expected_span_keys=set(gate.expected_span_keys(capture)),
+                )
+                final = gate.complete_drain(capture, result)
+                self.assertEqual(final.state, "observed")
+                self.assertEqual(final.storage, "verified")
+                self.assertEqual(final.persisted_spans, 1)
+                self.assertIsNotNone(final.timeline_url)
+
+                status = await self.client.post(
+                    "/v1/recordings/status",
+                    json=dict(asdict(OWNER), capture_id=capture),
+                )
+                self.assertEqual(status.status_code, 200, status.text)
+                self.assertEqual(status.json()["state"], "observed")
                 await self.send(batch((14, OWNER, 0)))
             async with db() as session:
                 rows = list(await session.scalars(select(models.Span)))
