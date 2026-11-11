@@ -471,6 +471,35 @@ def test_managed_span_capacity_is_bounded_before_enqueue(metrics: _Metrics) -> N
     asyncio.run(run())
 
 
+def test_managed_span_byte_capacity_is_bounded_before_enqueue(metrics: _Metrics) -> None:
+    async def run() -> None:
+        large = replace(
+            _span("large"),
+            attributes={"recording.capture_id": "capture-id", "payload": "x" * 4096},
+        )
+        inserter = _inserter(MagicMock(), managed_span_max_bytes=1024)
+
+        await inserter._enqueue_span(large, "task-recordings")
+
+        assert not inserter._spans
+        metrics.managed_dropped.labels.assert_called_once_with(reason="byte_capacity")
+
+    asyncio.run(run())
+
+
+def test_initial_managed_spans_obey_byte_capacity(metrics: _Metrics) -> None:
+    large = replace(
+        _span("large"),
+        attributes={"recording.capture_id": "capture-id", "payload": "x" * 4096},
+    )
+    inserter = _inserter(
+        MagicMock(), large, managed_span_max_bytes=1024
+    )
+
+    assert not inserter._spans
+    metrics.managed_dropped.labels.assert_called_once_with(reason="byte_capacity")
+
+
 @pytest.mark.parametrize("outcome", ["commit", "rollback", "cancel"])
 async def test_sqlite_production_batch_is_atomic_and_releases_connection(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, outcome: str

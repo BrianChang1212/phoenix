@@ -203,13 +203,20 @@ class _RecordingLedger:
             )
         )
         with self._db:
+            restarted_at_ns = time_ns()
             for capture_id, gaps_json in active:
                 gaps = set(json.loads(gaps_json))
                 gaps.add("receiver_restart")
                 self._db.execute(
                     "UPDATE captures SET state='incomplete', stopped_at_ns=?, "
+                    "drain_deadline_ns=?, "
                     "gaps=? WHERE capture_id=?",
-                    (time_ns(), json.dumps(sorted(gaps)), capture_id),
+                    (
+                        restarted_at_ns,
+                        restarted_at_ns,
+                        json.dumps(sorted(gaps)),
+                        capture_id,
+                    ),
                 )
 
     def load(self) -> tuple[dict[str, _Capture], dict[tuple[ConversationKey, str], _Capture]]:
@@ -411,7 +418,12 @@ class RecordingGate:
         self._readback_attempted = {
             capture.capture_id
             for capture in self._captures.values()
-            if capture.state in ("incomplete", "observed", "empty", "failed")
+            if capture.state in ("observed", "empty", "failed")
+            or capture.state == "incomplete"
+            and (
+                "receiver_restart" not in capture.gaps
+                or "storage_readback_failed" in capture.gaps
+            )
         }
         self.receiver_gaps: dict[str, int] = {}
 
@@ -433,11 +445,13 @@ class RecordingGate:
         capture.idle_lease_deadline_ns = min(
             capture.started_at_ns + self.idle_lease_ns, capture.hard_deadline_ns
         )
+        # The durable receipt is the admission fence. Never expose the capture
+        # to this receiver until persistence succeeds.
+        if self._ledger:
+            self._ledger.save_capture(capture)
         self._captures[capture.capture_id] = capture
         self._commands[owner, request_id] = capture
         self._active[owner] = capture
-        if self._ledger:
-            self._ledger.save_capture(capture)
         return capture.receipt()
 
     def status(
@@ -752,9 +766,11 @@ class RecordingGate:
                         continue
                     if len(capture.admitted) >= self.max_capture_spans:
                         capture.gaps.add("capture_limit")
-                        capture.state = "failed"
                         capture.stopped_at_ns = self._clock_ns()
-                        self._active.pop(owner)
+                        capture.drain_deadline_ns = (
+                            capture.stopped_at_ns + self.drain_grace_ns
+                        )
+                        capture.state = "draining"
                         dirty_captures[capture.capture_id] = capture
                         continue
                     capture.admitted.add(span_key)
