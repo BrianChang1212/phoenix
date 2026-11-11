@@ -1,57 +1,106 @@
-import { act, useState } from "react";
-import { createRoot } from "react-dom/client";
-import { expect, it } from "vitest";
+import { act } from "react";
+import { createRoot, type Root } from "react-dom/client";
+import { MemoryRouter, useLocation } from "react-router";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
-import { SessionFiltersContext } from "../SessionFiltersContext";
+import {
+  SessionFiltersProvider,
+  useSessionFilters,
+} from "../SessionFiltersContext";
 import { SessionSourceFilter } from "../SessionSourceFilter";
 
-it("filters by instrumentation source while preserving the user's condition", () => {
-  const container = document.createElement("div");
-  const root = createRoot(container);
-  function TestPage() {
-    const [filterCondition, setFilterCondition] = useState("latency_ms > 1000");
+describe("Session source presets", () => {
+  let container: HTMLDivElement;
+  let root: Root;
+
+  beforeEach(() => {
+    container = document.createElement("div");
+    document.body.append(container);
+    root = createRoot(container);
+  });
+  afterEach(() => {
+    act(() => root.unmount());
+    container.remove();
+  });
+
+  function Page() {
+    const { filterCondition, setFilterCondition } = useSessionFilters();
+    const location = useLocation();
     return (
-      <SessionFiltersContext.Provider
-        value={{
-          filterCondition,
-          setFilterCondition,
-          appendFilterCondition: setFilterCondition,
-        }}
-      >
+      <>
         <SessionSourceFilter />
-        <output>{filterCondition}</output>
-      </SessionFiltersContext.Provider>
+        <button
+          onClick={() =>
+            setFilterCondition(`${filterCondition} and num_traces < 10`)
+          }
+        >
+          Append condition
+        </button>
+        <output data-condition>{filterCondition}</output>
+        <output data-search>{location.search}</output>
+      </>
     );
   }
-  act(() => root.render(<TestPage />));
-  const select = container.querySelector("select");
-  if (!select) throw new Error("Source filter not rendered");
-  act(() => {
-    select.value = "codex";
-    select.dispatchEvent(new Event("change", { bubbles: true }));
+  async function renderPage(condition: string, source?: string) {
+    const params = new URLSearchParams({ sessionFilterCondition: condition });
+    if (source) params.set("sessionSource", source);
+    await act(async () =>
+      root.render(
+        <MemoryRouter initialEntries={[`/sessions?${params}`]}>
+          <SessionFiltersProvider>
+            <Page />
+          </SessionFiltersProvider>
+        </MemoryRouter>
+      )
+    );
+  }
+  async function selectSource(value: string) {
+    const select = container.querySelector("select");
+    if (!select) throw new Error("Source filter not rendered");
+    await act(async () => {
+      select.value = value;
+      select.dispatchEvent(new Event("change", { bubbles: true }));
+    });
+  }
+
+  it("does not truncate manual DSL that ends with a known source predicate", async () => {
+    const condition =
+      'latency_ms > 1000 and (any(s.name == "run_turn" for s in spans))';
+    await renderPage(condition, "codex");
+    await selectSource("all");
+    expect(container.querySelector("[data-condition]")?.textContent).toBe(
+      condition
+    );
+    expect(
+      new URLSearchParams(
+        container.querySelector("[data-search]")?.textContent ?? ""
+      ).get("sessionFilterCondition")
+    ).toBe(condition);
+    expect(container.querySelector("[data-search]")?.textContent).not.toContain(
+      "sessionSource"
+    );
   });
-  expect(container.querySelector("output")?.textContent).toContain(
-    "latency_ms > 1000"
-  );
-  expect(container.querySelector("output")?.textContent).toContain(
-    's.name == "run_turn"'
-  );
-  act(() => {
-    select.value = "kiro";
-    select.dispatchEvent(new Event("change", { bubbles: true }));
+
+  it("keeps presets separate from manually edited conditions", async () => {
+    await renderPage("num_traces >= 5");
+    await selectSource("codex");
+    expect(container.querySelector("[data-condition]")?.textContent).toBe(
+      "num_traces >= 5"
+    );
+    expect(container.querySelector("[data-search]")?.textContent).toContain(
+      "sessionSource=codex"
+    );
+    await act(async () => container.querySelector("button")?.click());
+    await selectSource("kiro");
+    expect(container.querySelector("[data-condition]")?.textContent).toBe(
+      "num_traces >= 5 and num_traces < 10"
+    );
+    expect(container.querySelector("[data-search]")?.textContent).toContain(
+      "sessionSource=kiro"
+    );
+    await selectSource("all");
+    expect(container.querySelector("[data-condition]")?.textContent).toBe(
+      "num_traces >= 5 and num_traces < 10"
+    );
   });
-  expect(container.querySelector("output")?.textContent).toContain(
-    's.name == "kiro.session"'
-  );
-  expect(container.querySelector("output")?.textContent).not.toContain(
-    's.name == "run_turn"'
-  );
-  act(() => {
-    select.value = "all";
-    select.dispatchEvent(new Event("change", { bubbles: true }));
-  });
-  expect(container.querySelector("output")?.textContent).toBe(
-    "latency_ms > 1000"
-  );
-  act(() => root.unmount());
 });

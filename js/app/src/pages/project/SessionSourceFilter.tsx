@@ -1,21 +1,12 @@
-import { useSessionFilters } from "./SessionFiltersContext";
+import { useSearchParams } from "react-router";
 
-const codexCondition = 'any(s.name == "run_turn" for s in spans)';
-const kiroCondition =
-  'any(s.name == "kiro.observed_tool_window" or s.name == "kiro.session" for s in spans)';
-const sourceConditions = {
-  codex: codexCondition,
-  kiro: kiroCondition,
-  unknown: `not (${codexCondition}) and not (${kiroCondition})`,
-};
+import {
+  readSessionSource,
+  SESSION_SOURCE_PARAM,
+} from "./sessionSourceCondition";
 
 export function SessionSourceFilter() {
-  const { filterCondition, setFilterCondition } = useSessionFilters();
-  const current = Object.entries(sourceConditions).find(
-    ([, condition]) =>
-      filterCondition === condition ||
-      filterCondition.endsWith(` and (${condition})`)
-  );
+  const [searchParams, setSearchParams] = useSearchParams();
   return (
     <label
       style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 13 }}
@@ -23,7 +14,7 @@ export function SessionSourceFilter() {
       Source
       <select
         aria-label="Session source"
-        value={current?.[0] ?? "all"}
+        value={readSessionSource(searchParams)}
         title="依已觀測 instrumentation span 名稱篩選；未知不代表沒有來源。"
         style={{
           color: "inherit",
@@ -33,18 +24,15 @@ export function SessionSourceFilter() {
           padding: 8,
         }}
         onChange={(event) => {
-          let base = filterCondition;
-          if (current) {
-            base =
-              base === current[1]
-                ? ""
-                : base.slice(1, -(` and (${current[1]})`.length + 1));
-          }
-          const next = Object.entries(sourceConditions).find(
-            ([key]) => key === event.target.value
-          )?.[1];
-          setFilterCondition(
-            next ? (base ? `(${base}) and (${next})` : next) : base
+          const source = event.target.value;
+          setSearchParams(
+            (previous) => {
+              const next = new URLSearchParams(previous);
+              if (source === "all") next.delete(SESSION_SOURCE_PARAM);
+              else next.set(SESSION_SOURCE_PARAM, source);
+              return next;
+            },
+            { replace: true }
           );
         }}
       >

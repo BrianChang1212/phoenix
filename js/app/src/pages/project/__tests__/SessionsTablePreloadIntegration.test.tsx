@@ -171,13 +171,13 @@ describe("SessionsTable preload integration", () => {
     container.remove();
   });
 
-  function renderTable() {
+  function renderTable(source?: string) {
     return act(async () => {
       root.render(
         <ThemeProvider themeMode="light" disableBodyTheme>
           <MemoryRouter
             initialEntries={[
-              `/projects/project-integration/sessions?sessionFilterCondition=${encodeURIComponent(seed)}`,
+              `/projects/project-integration/sessions?sessionFilterCondition=${encodeURIComponent(seed)}${source ? `&sessionSource=${source}` : ""}`,
             ]}
           >
             <SessionFiltersProvider>
@@ -244,6 +244,61 @@ describe("SessionsTable preload integration", () => {
       sessionFilterCondition: null,
     });
     expect(probedSearch).not.toContain("sessionFilterCondition");
+  });
+
+  it("applies the source from a deep link while retaining the manual condition", async () => {
+    await renderTable("codex");
+    expect(relayMocks.refetch).toHaveBeenCalledTimes(1);
+    expect(relayMocks.refetch.mock.calls[0]?.[0]).toMatchObject({
+      sessionFilterCondition:
+        '(num_traces >= 5) and (any(s.name == "run_turn" for s in spans))',
+    });
+    expect(
+      new URLSearchParams(probedSearch).get("sessionFilterCondition")
+    ).toBe(seed);
+    expect(new URLSearchParams(probedSearch).get("sessionSource")).toBe(
+      "codex"
+    );
+  });
+
+  it("replaces only the source preset after editing the manual condition", async () => {
+    await renderTable();
+    const select = container.querySelector<HTMLSelectElement>(
+      'select[aria-label="Session source"]'
+    );
+    if (!select) throw new Error("Source filter missing");
+    await act(async () => {
+      select.value = "codex";
+      select.dispatchEvent(new Event("change", { bubbles: true }));
+    });
+    const condition = "num_traces >= 10 and num_traces < 20";
+    await act(async () => {
+      fieldMocks.props?.onValidCondition({
+        condition,
+        isInitialSettlement: false,
+      });
+    });
+    await act(async () => {
+      select.value = "kiro";
+      select.dispatchEvent(new Event("change", { bubbles: true }));
+    });
+    expect(relayMocks.refetch.mock.lastCall?.[0]).toMatchObject({
+      sessionFilterCondition:
+        '(num_traces >= 10 and num_traces < 20) and (any(s.name == "kiro.observed_tool_window" or s.name == "kiro.session" for s in spans))',
+    });
+    expect(
+      new URLSearchParams(probedSearch).get("sessionFilterCondition")
+    ).toBe(condition);
+    await act(async () => {
+      select.value = "all";
+      select.dispatchEvent(new Event("change", { bubbles: true }));
+    });
+    expect(relayMocks.refetch.mock.lastCall?.[0]).toMatchObject({
+      sessionFilterCondition: condition,
+    });
+    expect(
+      new URLSearchParams(probedSearch).get("sessionFilterCondition")
+    ).toBe(condition);
   });
 });
 

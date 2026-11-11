@@ -75,6 +75,10 @@ import {
 import { SessionColumnSelector } from "./SessionColumnSelector";
 import type { SessionFilterValidConditionArgs } from "./SessionFilterConditionField";
 import { SessionFilterConditionFieldWithVocabulary } from "./SessionFilterConditionField";
+import {
+  readSessionSource,
+  withSessionSourceCondition,
+} from "./sessionSourceCondition";
 import { SessionSourceFilter } from "./SessionSourceFilter";
 import { SessionsTableAside } from "./SessionsTableAside";
 import { SessionsTableEmpty } from "./SessionsTableEmpty";
@@ -172,7 +176,12 @@ export function SessionsTable(props: SessionsTableProps) {
     useState<string>(props.seed);
   // React Router 8.2 recreates this setter whenever location.search changes; a
   // stable ref keeps unrelated param changes out of the field's validation.
-  const [, setSearchParams] = useSearchParams();
+  const [searchParams, setSearchParams] = useSearchParams();
+  const source = readSessionSource(searchParams);
+  const effectiveSessionFilterCondition = withSessionSourceCondition({
+    condition: validSessionFilterCondition,
+    source,
+  });
   const setSearchParamsRef = useRef(setSearchParams);
   useEffect(() => {
     setSearchParamsRef.current = setSearchParams;
@@ -476,11 +485,11 @@ export function SessionsTable(props: SessionsTableProps) {
     },
   ];
   useEffect(() => {
-    // The parent's query already carries the seed, so the first render needs
-    // no refetch.
+    // The preload carries the manual seed, but a source preset from the URL
+    // still needs to be applied to that query.
     if (isFirstRender.current) {
       isFirstRender.current = false;
-      return;
+      if (source === "all") return;
     }
     const sort = sorting[0];
     startTransition(() => {
@@ -489,7 +498,7 @@ export function SessionsTable(props: SessionsTableProps) {
           sort: sort ? getGqlSessionSort(sort) : DEFAULT_SESSION_SORT,
           after: null,
           first: PAGE_SIZE,
-          sessionFilterCondition: validSessionFilterCondition || null,
+          sessionFilterCondition: effectiveSessionFilterCondition || null,
           timeRange: timeRangeISOStrings,
         },
         { fetchPolicy: "store-and-network" }
@@ -498,7 +507,8 @@ export function SessionsTable(props: SessionsTableProps) {
   }, [
     sorting,
     refetch,
-    validSessionFilterCondition,
+    effectiveSessionFilterCondition,
+    source,
     fetchKey,
     timeRangeISOStrings,
   ]);
@@ -743,7 +753,7 @@ export function SessionsTable(props: SessionsTableProps) {
           </Panel>
           <TableAsidePanel>
             <SessionsTableAside
-              sessionFilterCondition={validSessionFilterCondition || null}
+              sessionFilterCondition={effectiveSessionFilterCondition || null}
             />
           </TableAsidePanel>
         </Group>
