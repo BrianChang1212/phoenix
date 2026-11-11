@@ -15,6 +15,9 @@ from strawberry.relay import Connection, Node, NodeID
 
 from phoenix.db import models
 from phoenix.server.api.context import Context
+from phoenix.server.api.dataloaders.session_recording_metadata import (
+    SessionRecordingMetadata as SessionRecordingMetadataValue,
+)
 from phoenix.server.api.extensions import RequireForwardPaginationExtension
 from phoenix.server.api.input_types.AnnotationFilter import AnnotationFilter, satisfies_filter
 from phoenix.server.api.types.AnnotationSummary import AnnotationSummary
@@ -39,6 +42,12 @@ if TYPE_CHECKING:
 
 
 @strawberry.type
+class SessionRecordingMetadata:
+    task: str
+    source: str
+
+
+@strawberry.type
 class ProjectSession(Node):
     id: NodeID[int]
     db_record: strawberry.Private[Optional[models.ProjectSession]] = None
@@ -46,6 +55,18 @@ class ProjectSession(Node):
     def __post_init__(self) -> None:
         if self.db_record and self.id != self.db_record.id:
             raise ValueError("ProjectSession ID mismatch")
+
+    @strawberry.field
+    async def recording_metadata(
+        self,
+        info: Info[Context, None],
+    ) -> Optional[SessionRecordingMetadata]:
+        metadata: Optional[SessionRecordingMetadataValue] = await (
+            info.context.data_loaders.session_recording_metadata.load(self.id)
+        )
+        if metadata is None:
+            return None
+        return SessionRecordingMetadata(task=metadata.task, source=metadata.source)
 
     @strawberry.field
     async def session_id(

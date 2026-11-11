@@ -3304,6 +3304,7 @@ type ProjectSession implements Node {
   """The Globally Unique ID of this object"""
   id: ID!
   sessionId: String!
+  recordingMetadata: SessionRecordingMetadata
   startTime: DateTime!
   endTime: DateTime!
   project: Project!
@@ -3325,6 +3326,11 @@ type ProjectSession implements Node {
 
   """Summarizes each annotation (by name) associated with the session"""
   sessionAnnotationSummaries(filter: AnnotationFilter = null): [AnnotationSummary!]!
+}
+
+type SessionRecordingMetadata {
+  task: String!
+  source: String!
 }
 
 enum ProjectSessionAnnoAttr {

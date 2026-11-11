@@ -1,5 +1,5 @@
 /**
- * @generated SignedSource<<48be34bad66248e624b81ace8e349596>>
+ * @generated SignedSource<<6e8fc35e5b9bb6a761b12a2603f7b338>>
  * @lightSyntaxTransform
  */
 
@@ -29,6 +29,10 @@ export type SessionsTable_sessions$data = {
           readonly value: string;
         } | null;
         readonly numTraces: number;
+        readonly recordingMetadata: {
+          readonly source: string;
+          readonly task: string;
+        } | null;
         readonly sessionId: string;
         readonly startTime: string;
         readonly tokenUsage: {
@@ -196,6 +200,31 @@ return {
                   "args": null,
                   "kind": "ScalarField",
                   "name": "sessionId",
+                  "storageKey": null
+                },
+                {
+                  "alias": null,
+                  "args": null,
+                  "concreteType": "SessionRecordingMetadata",
+                  "kind": "LinkedField",
+                  "name": "recordingMetadata",
+                  "plural": false,
+                  "selections": [
+                    {
+                      "alias": null,
+                      "args": null,
+                      "kind": "ScalarField",
+                      "name": "task",
+                      "storageKey": null
+                    },
+                    {
+                      "alias": null,
+                      "args": null,
+                      "kind": "ScalarField",
+                      "name": "source",
+                      "storageKey": null
+                    }
+                  ],
                   "storageKey": null
                 },
                 {
@@ -389,6 +418,6 @@ return {
 };
 })();
 
-(node as any).hash = "c30bc00b2f58d9c6b9d71ddc0541609d";
+(node as any).hash = "2fc0cb3250e6cbb0a44a14ea7e532b1f";
 
 export default node;
