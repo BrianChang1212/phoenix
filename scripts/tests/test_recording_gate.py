@@ -24,6 +24,7 @@ from phoenix.server.cost_tracking.span_cost_calculator import SpanCostCalculator
 from phoenix.server.daemons.generative_model_store import GenerativeModelStore
 from phoenix.server.grpc_server import Servicer
 from phoenix.server.recording import ConversationKey, RecordingGate
+from phoenix.server.recording_readback import read_recording_spans
 from phoenix.server.types import DbSessionFactory
 
 OWNER = ConversationKey("codex", "019a74e9-a998-7320-abcd-012345678901")
@@ -690,6 +691,147 @@ class RecordingHttpTests(unittest.IsolatedAsyncioTestCase):
                 rows = list(await session.scalars(select(models.Span)))
                 self.assertEqual(len(rows), 1)
             print(f"SQLite recording evidence: {database_path.resolve()}")
+        finally:
+            await engine.dispose()
+
+    async def test_codex_and_kiro_interleaved_recordings_read_back_independently(self):
+        evidence = Path(".audit")
+        evidence.mkdir(exist_ok=True)
+        database_path = evidence / f"recording-mixed-{uuid4()}.db"
+        engine = aio_sqlite_engine(
+            URL.create("sqlite+aiosqlite", database=str(database_path)), migrate=False
+        )
+        gate = RecordingGate(drain_grace_sec=0.01)
+        self.app.state.recording_gate = gate
+        try:
+            async with engine.begin() as connection:
+                await connection.run_sync(models.Base.metadata.create_all)
+            db = DbSessionFactory(_db(engine), "sqlite")
+            inserter = BulkInserter(
+                db,
+                event_queue=SimpleQueue(),
+                span_cost_calculator=SpanCostCalculator(GenerativeModelStore(db)),
+            )
+            async with inserter as (_, enqueue_span, _):
+                self.enqueue_span = enqueue_span
+                codex_start = await self.client.post(
+                    "/v1/recordings/start",
+                    json=dict(
+                        asdict(OWNER), task="Codex mixed test", request_id=str(uuid4())
+                    ),
+                )
+                kiro_start = await self.client.post(
+                    "/v1/recordings/start",
+                    json=dict(
+                        asdict(KIRO_OWNER), task="Kiro mixed test", request_id=str(uuid4())
+                    ),
+                )
+                self.assertEqual(codex_start.status_code, 200, codex_start.text)
+                self.assertEqual(kiro_start.status_code, 200, kiro_start.text)
+                codex_capture = codex_start.json()["capture_id"]
+                kiro_capture = kiro_start.json()["capture_id"]
+
+                await self.send(batch((20, OWNER, 0), (21, OTHER, 0)))
+                first_event = str(uuid4())
+                delayed_event = str(uuid4())
+                rejected_event = str(uuid4())
+                await self.send(
+                    kiro_batch(
+                        KIRO_OWNER.conversation_id,
+                        kiro_capture,
+                        22,
+                        event_id=first_event,
+                    )
+                )
+
+                codex_stop = await self.client.post(
+                    "/v1/recordings/stop",
+                    json=dict(asdict(OWNER), capture_id=codex_capture),
+                )
+                kiro_stop = await self.client.post(
+                    "/v1/recordings/stop",
+                    json=dict(
+                        asdict(KIRO_OWNER),
+                        capture_id=kiro_capture,
+                        observed_event_ids=[first_event, delayed_event],
+                        manifest_complete=True,
+                    ),
+                )
+                self.assertEqual(codex_stop.status_code, 200, codex_stop.text)
+                self.assertEqual(kiro_stop.status_code, 200, kiro_stop.text)
+
+                await self.send(batch((23, OWNER, 0)))
+                await self.send(
+                    kiro_batch(
+                        KIRO_OWNER.conversation_id,
+                        kiro_capture,
+                        24,
+                        event_id=delayed_event,
+                    )
+                )
+                await self.send(
+                    kiro_batch(
+                        KIRO_OWNER.conversation_id,
+                        kiro_capture,
+                        25,
+                        event_id=rejected_event,
+                    )
+                )
+
+                for _ in range(100):
+                    async with db() as session:
+                        rows = list(await session.scalars(select(models.Span)))
+                    if len(rows) >= 3:
+                        break
+                    await asyncio.sleep(0.02)
+                self.assertEqual(len(rows), 3)
+
+                deadline = max(
+                    codex_stop.json()["drain_deadline_ns"],
+                    kiro_stop.json()["drain_deadline_ns"],
+                )
+                gate.tick(now_ns=deadline)
+                for capture_id in (codex_capture, kiro_capture):
+                    due = gate.draining_captures_due(now_ns=deadline)
+                    self.assertIn(capture_id, {item.capture_id for item in due})
+                    result = await read_recording_spans(
+                        db,
+                        capture_id=capture_id,
+                        expected_span_keys=set(gate.expected_span_keys(capture_id)),
+                    )
+                    final = gate.complete_drain(capture_id, result)
+                    if capture_id == codex_capture:
+                        self.assertEqual(final.state, "incomplete")
+                        self.assertEqual(final.storage, "verified")
+                        self.assertEqual(final.persisted_spans, 1)
+                        self.assertIn("late_unobserved_operation", final.gaps)
+                        self.assertIsNotNone(final.timeline_url)
+                    else:
+                        self.assertEqual(final.state, "incomplete")
+                        self.assertEqual(final.storage, "verified")
+                        self.assertEqual(final.persisted_spans, 2)
+                        self.assertIn("late_unobserved_operation", final.gaps)
+                        self.assertIsNotNone(final.timeline_url)
+
+                async with db() as session:
+                    persisted = list(await session.scalars(select(models.Span)))
+                capture_ids = [
+                    row.attributes["recording"]["capture_id"] for row in persisted
+                ]
+                self.assertEqual(capture_ids.count(codex_capture), 1)
+                self.assertEqual(capture_ids.count(kiro_capture), 2)
+
+                codex_status = await self.client.post(
+                    "/v1/recordings/status",
+                    json=dict(asdict(OWNER), capture_id=codex_capture),
+                )
+                kiro_status = await self.client.post(
+                    "/v1/recordings/status",
+                    json=dict(asdict(KIRO_OWNER), capture_id=kiro_capture),
+                )
+                self.assertEqual(codex_status.json()["state"], "incomplete")
+                self.assertEqual(kiro_status.json()["state"], "incomplete")
+                self.assertEqual(kiro_status.json()["persisted_spans"], 2)
         finally:
             await engine.dispose()
 
