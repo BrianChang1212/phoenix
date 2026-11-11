@@ -12,6 +12,7 @@ import {
   type DurationKind,
   type TimelineSegment,
 } from "./sessionTimelineDuration";
+import { OperationTokenUsage, SessionTokenSummary } from "./SessionTokenUsage";
 import { useSessionTimelineRefresh } from "./useSessionTimelineRefresh";
 
 const timelineCSS = css`
@@ -386,6 +387,7 @@ export function SessionTimeline({
     <section css={timelineCSS} aria-label="Session 操作時間軸">
       <h2>操作時間軸</h2>
       {refreshControls}
+      <SessionTokenSummary data={data} turnId={effectiveTurnId} />
       <div className="timeline-overview">
         <svg
           viewBox="0 0 110 110"
@@ -630,6 +632,7 @@ export function SessionTimeline({
               aria-live="polite"
             >
               <h3>{displayedOperation.summary ?? displayedOperation.name}</h3>
+              <OperationTokenUsage operation={displayedOperation} />
               {!displayedOperation.summary && (
                 <p className="timeline-muted">
                   摘要不可用 · {displayedOperation.name}
