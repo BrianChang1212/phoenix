@@ -6,6 +6,7 @@ from dataclasses import asdict
 from pathlib import Path
 from queue import SimpleQueue
 from types import SimpleNamespace
+from unittest.mock import patch
 from uuid import uuid4
 
 import httpx
@@ -310,6 +311,22 @@ class RecordingGateTests(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "different Phoenix database"):
                 RecordingGate(ledger_path=ledger_path, database_binding="db-b")
 
+    def test_start_ledger_failure_does_not_leave_an_active_capture(self):
+        with tempfile.TemporaryDirectory() as directory:
+            gate = RecordingGate(ledger_path=Path(directory) / "recordings.sqlite3")
+            request_id = str(uuid4())
+            try:
+                with patch.object(gate._ledger, "save_capture", side_effect=OSError("disk full")):
+                    with self.assertRaisesRegex(OSError, "disk full"):
+                        gate.start(OWNER, "persist receipt", request_id)
+
+                self.assertIsNone(gate.status(OWNER))
+                self.assertEqual(spans(gate.admit(batch((1, OWNER, 0)))), [])
+                retry = gate.start(OWNER, "persist receipt", request_id)
+                self.assertEqual(retry.state, "recording")
+            finally:
+                gate.close()
+
     def test_recording_ledger_process_lock_fails_closed(self):
         with tempfile.TemporaryDirectory() as directory:
             ledger_path = Path(directory) / "recordings.sqlite3"
@@ -319,6 +336,64 @@ class RecordingGateTests(unittest.TestCase):
                     RecordingGate(ledger_path=ledger_path)
             finally:
                 owner.close()
+
+    def test_restart_reads_back_persisted_spans_without_resuming_capture(self):
+        with tempfile.TemporaryDirectory() as directory:
+            ledger_path = Path(directory) / "recordings.sqlite3"
+            first = RecordingGate(ledger_path=ledger_path)
+            capture = first.start(OWNER, "restart readback", str(uuid4()))
+            first.admit(batch((1, OWNER, 0), (2, OWNER, 0)))
+            first.close()
+
+            recovered = RecordingGate(ledger_path=ledger_path)
+            try:
+                restarted = recovered.status(OWNER, capture.capture_id)
+                self.assertEqual(restarted.state, "incomplete")
+                self.assertIn("receiver_restart", restarted.gaps)
+                self.assertEqual(spans(recovered.admit(batch((3, OWNER, 0)))), [])
+                due = recovered.draining_captures_due(now_ns=time.time_ns())
+                self.assertEqual([item.capture_id for item in due], [capture.capture_id])
+                self.assertTrue(recovered.begin_readback(capture.capture_id))
+                expected = frozenset(recovered.expected_span_keys(capture.capture_id))
+                result = SimpleNamespace(
+                    persisted_span_keys=frozenset({next(iter(expected))}),
+                    storage="partial",
+                    project_relay_id="project",
+                    session_relay_id="session",
+                )
+                verified = recovered.complete_drain(capture.capture_id, result)
+                self.assertEqual(verified.state, "incomplete")
+                self.assertEqual(verified.storage, "partial")
+                self.assertIn("receiver_restart", verified.gaps)
+                self.assertIsNotNone(verified.timeline_url)
+                self.assertFalse(recovered.begin_readback(capture.capture_id))
+            finally:
+                recovered.close()
+
+    def test_capture_span_limit_drains_partial_data_for_readback(self):
+        gate = RecordingGate(max_capture_spans=1, drain_grace_sec=1)
+        capture = gate.start(OWNER, "capture limit", str(uuid4()))
+        self.assertEqual(len(spans(gate.admit(batch((1, OWNER, 0))))), 1)
+        self.assertEqual(spans(gate.admit(batch((2, OWNER, 0)))), [])
+        limited = gate.status(OWNER, capture.capture_id)
+        self.assertEqual(limited.state, "draining")
+        self.assertIn("capture_limit", limited.gaps)
+        due_at = limited.drain_deadline_ns
+        gate.tick(now_ns=due_at)
+        due = gate.draining_captures_due(now_ns=due_at)
+        self.assertEqual(len(due), 1)
+        self.assertTrue(gate.begin_readback(capture.capture_id))
+        result = SimpleNamespace(
+            persisted_span_keys=frozenset(gate.expected_span_keys(capture.capture_id)),
+            storage="verified",
+            project_relay_id="project",
+            session_relay_id="session",
+        )
+        final = gate.complete_drain(capture.capture_id, result)
+        self.assertEqual(final.state, "incomplete")
+        self.assertEqual(final.storage, "verified")
+        self.assertIn("capture_limit", final.gaps)
+        self.assertIsNotNone(final.timeline_url)
 
     def test_batch_limit_fails_closed_for_managed_spans(self):
         gate = RecordingGate(max_batch_spans=1)
