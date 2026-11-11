@@ -1,9 +1,11 @@
 import asyncio
+import tempfile
 import time
 import unittest
 from dataclasses import asdict
 from pathlib import Path
 from queue import SimpleQueue
+from types import SimpleNamespace
 from uuid import uuid4
 
 import httpx
@@ -52,7 +54,7 @@ def spans(request):
     return [s for r in request.resource_spans for group in r.scope_spans for s in group.spans]
 
 
-def kiro_batch(session_id, capture_id, index):
+def kiro_batch(session_id, capture_id, index, event_id=None, source_event_ids=None, result=None):
     request = ExportTraceServiceRequest()
     resource = request.resource_spans.add()
     resource.resource.attributes.add(key="openinference.project.name").value.string_value = "kiro-local"
@@ -66,6 +68,12 @@ def kiro_batch(session_id, capture_id, index):
     )
     span.attributes.add(key="session.id").value.string_value = session_id
     span.attributes.add(key="recording.capture_id").value.string_value = capture_id
+    if event_id:
+        span.attributes.add(key="kiro.event_id").value.string_value = event_id
+    if source_event_ids:
+        span.attributes.add(key="kiro.source_event_ids").value.string_value = ",".join(source_event_ids)
+    if result:
+        span.attributes.add(key="kiro.result").value.string_value = result
     return request
 
 
@@ -126,14 +134,94 @@ class RecordingGateTests(unittest.TestCase):
         incoming = batch((1, OWNER, 0))
         first_span = spans(self.gate.admit(incoming))[0]
         stopped = self.gate.stop(OWNER, first.capture_id)
-        self.assertEqual(stopped.state, "incomplete")
+        self.assertEqual(stopped.state, "draining")
         self.assertEqual(stopped.storage, "unverified")
         self.assertEqual(spans(self.gate.admit(batch((2, OWNER, 0)))), [])
+        self.gate.tick(now_ns=stopped.drain_deadline_ns)
         second = self.start()
         self.assertNotEqual(first.capture_id, second.capture_id)
         self.assertEqual(spans(self.gate.admit(incoming)), [])
         second_span = spans(self.gate.admit(batch((3, OWNER, 0))))[0]
         self.assertNotEqual(first_span.trace_id, second_span.trace_id)
+
+    def test_idle_lease_expires_into_a_bounded_drain(self):
+        now = [1_000_000_000]
+        gate = RecordingGate(
+            clock_ns=lambda: now[0], idle_lease_sec=5, drain_grace_sec=2
+        )
+        capture = gate.start(OWNER, "lease", str(uuid4()))
+        gate.admit(batch((1, OWNER, 0)))
+        now[0] = capture.idle_lease_deadline_ns
+        gate.tick(now_ns=now[0])
+        self.assertEqual(gate.status(OWNER, capture.capture_id).state, "draining")
+        self.assertEqual(gate.draining_captures_due(now_ns=now[0]), ())
+        now[0] += 2_000_000_000
+        gate.tick(now_ns=now[0])
+        due = gate.draining_captures_due(now_ns=now[0])
+        self.assertEqual([item.capture_id for item in due], [capture.capture_id])
+
+    def test_exact_primary_readback_is_required_before_timeline_url(self):
+        gate = RecordingGate(timeline_origin="https://localhost:7443")
+        capture = gate.start(OWNER, "readback", str(uuid4()))
+        gate.admit(batch((1, OWNER, 0)))
+        stopping = gate.stop(OWNER, capture.capture_id)
+        gate.tick(now_ns=stopping.drain_deadline_ns)
+        keys = frozenset(gate.expected_span_keys(capture.capture_id))
+        result = SimpleNamespace(
+            persisted_span_keys=keys,
+            storage="verified",
+            project_relay_id="UHJvamVjdDox",
+            session_relay_id="UHJvamVjdFNlc3Npb246Mg==",
+            gaps=(),
+        )
+        final = gate.complete_drain(capture.capture_id, result)
+        self.assertEqual(final.state, "observed")
+        self.assertEqual(
+            final.timeline_url,
+            "https://localhost:7443/projects/UHJvamVjdDox/sessions/"
+            "UHJvamVjdFNlc3Npb246Mg%3D%3D?sessionView=timeline",
+        )
+
+    def test_failed_primary_readback_is_one_shot_and_has_no_timeline_url(self):
+        gate = RecordingGate()
+        capture = gate.start(OWNER, "readback failure", str(uuid4()))
+        gate.admit(batch((1, OWNER, 0)))
+        stopping = gate.stop(OWNER, capture.capture_id)
+        gate.tick(now_ns=stopping.drain_deadline_ns)
+        self.assertTrue(gate.begin_readback(capture.capture_id))
+        failed = gate.fail_readback(capture.capture_id)
+        self.assertFalse(gate.begin_readback(capture.capture_id))
+        self.assertEqual(failed.state, "incomplete")
+        self.assertIsNone(failed.timeline_url)
+        self.assertIn("storage_readback_failed", failed.gaps)
+        self.assertEqual(
+            gate.draining_captures_due(now_ns=stopping.drain_deadline_ns), ()
+        )
+
+    def test_timeline_origin_must_be_loopback(self):
+        with self.assertRaises(ValueError):
+            RecordingGate(timeline_origin="https://phoenix.example.com")
+
+    def test_stop_drains_only_previously_observed_span_keys(self):
+        capture = self.start()
+        original = batch((1, OWNER, 0))
+        mapped = spans(self.gate.admit(original))[0]
+
+        stopping = self.gate.stop(OWNER, capture.capture_id)
+        self.assertEqual(stopping.state, "draining")
+        self.assertEqual(
+            [span.span_id for span in spans(self.gate.admit(batch((1, OWNER, 0), (2, OWNER, 0))))],
+            [mapped.span_id],
+        )
+        with self.assertRaises(ValueError):
+            self.start()
+
+        self.gate.tick(now_ns=stopping.drain_deadline_ns)
+        finalized = self.gate.status(OWNER, capture.capture_id)
+        self.assertEqual(finalized.state, "incomplete")
+        self.assertIn("storage_unverified", finalized.gaps)
+        self.assertIn("late_unobserved_operation", finalized.gaps)
+        self.assertEqual(spans(self.gate.admit(batch((3, OWNER, 0)))), [])
 
     def test_commands_are_idempotent_and_owner_scoped(self):
         request_id = str(uuid4())
@@ -144,10 +232,47 @@ class RecordingGateTests(unittest.TestCase):
         with self.assertRaises(KeyError):
             self.gate.stop(OTHER, first.capture_id)
         stopped = self.gate.stop(OWNER, first.capture_id)
+        self.assertEqual(stopped.state, "draining")
+        stopped = self.gate.tick(now_ns=stopped.drain_deadline_ns)[0]
         self.assertEqual(stopped.state, "empty")
         self.assertEqual(stopped, self.gate.stop(OWNER, first.capture_id))
         with self.assertRaises(ValueError):
             self.gate.start(OWNER, "different", request_id)
+
+    def test_restart_marks_active_capture_incomplete_and_keeps_request_id(self):
+        with tempfile.TemporaryDirectory() as directory:
+            ledger_path = Path(directory) / "recordings.sqlite3"
+            request_id = str(uuid4())
+            first = RecordingGate(ledger_path=ledger_path)
+            started = first.start(OWNER, "task", request_id)
+            first.close()
+
+            recovered = RecordingGate(ledger_path=ledger_path)
+            try:
+                receipt = recovered.status(OWNER, started.capture_id)
+                self.assertEqual(receipt.state, "incomplete")
+                self.assertIn("receiver_restart", receipt.gaps)
+                self.assertEqual(recovered.start(OWNER, "task", request_id), receipt)
+            finally:
+                recovered.close()
+
+    def test_database_binding_mismatch_fails_closed(self):
+        with tempfile.TemporaryDirectory() as directory:
+            ledger_path = Path(directory) / "recordings.sqlite3"
+            gate = RecordingGate(ledger_path=ledger_path, database_binding="db-a")
+            gate.close()
+            with self.assertRaisesRegex(RuntimeError, "different Phoenix database"):
+                RecordingGate(ledger_path=ledger_path, database_binding="db-b")
+
+    def test_recording_ledger_process_lock_fails_closed(self):
+        with tempfile.TemporaryDirectory() as directory:
+            ledger_path = Path(directory) / "recordings.sqlite3"
+            owner = RecordingGate(ledger_path=ledger_path)
+            try:
+                with self.assertRaisesRegex(RuntimeError, "already owned"):
+                    RecordingGate(ledger_path=ledger_path)
+            finally:
+                owner.close()
 
     def test_batch_limit_fails_closed_for_managed_spans(self):
         gate = RecordingGate(max_batch_spans=1)
@@ -185,12 +310,68 @@ class RecordingGateTests(unittest.TestCase):
         first = self.gate.start(KIRO_OWNER, "first", str(uuid4()))
         admitted = spans(self.gate.admit(kiro_batch(KIRO_OWNER.conversation_id, first.capture_id, 1)))
         self.assertEqual(len(admitted), 1)
-        self.gate.stop(KIRO_OWNER, first.capture_id)
+        stopped = self.gate.stop(KIRO_OWNER, first.capture_id)
+        self.gate.tick(now_ns=stopped.drain_deadline_ns)
         second = self.gate.start(KIRO_OWNER, "second", str(uuid4()))
         self.assertEqual(spans(self.gate.admit(kiro_batch(KIRO_OWNER.conversation_id, first.capture_id, 2))), [])
         self.assertEqual(self.gate.status(KIRO_OWNER, second.capture_id).queued_spans, 0)
         self.assertEqual(len(spans(self.gate.admit(kiro_batch(KIRO_OWNER.conversation_id, second.capture_id, 3)))), 1)
         self.assertEqual(self.gate.receiver_gaps["kiro:capture_mismatch"], 1)
+
+    def test_kiro_drain_accepts_only_event_ids_in_the_frozen_manifest(self):
+        capture = self.gate.start(KIRO_OWNER, "task", str(uuid4()))
+        stopping = self.gate.stop(
+            KIRO_OWNER, capture.capture_id, observed_event_ids=("event-a",)
+        )
+
+        admitted = spans(
+            self.gate.admit(
+                kiro_batch(KIRO_OWNER.conversation_id, capture.capture_id, 1, "event-a")
+            )
+        )
+        rejected = spans(
+            self.gate.admit(
+                kiro_batch(KIRO_OWNER.conversation_id, capture.capture_id, 2, "event-b")
+            )
+        )
+
+        self.assertEqual(len(admitted), 1)
+        self.assertEqual(rejected, [])
+        self.assertEqual(
+            self.gate.status(KIRO_OWNER, capture.capture_id).state, "draining"
+        )
+        self.assertEqual(self.gate.status(KIRO_OWNER, capture.capture_id).gaps, ("late_unobserved_operation",))
+        self.gate.tick(now_ns=stopping.drain_deadline_ns)
+        self.assertEqual(
+            self.gate.status(KIRO_OWNER, capture.capture_id).state, "incomplete"
+        )
+
+    def test_unmatched_kiro_hook_observation_is_incomplete_after_verified_readback(self):
+        capture = self.gate.start(KIRO_OWNER, "partial hook", str(uuid4()))
+        self.gate.admit(
+            kiro_batch(
+                KIRO_OWNER.conversation_id,
+                capture.capture_id,
+                1,
+                event_id="partial-event",
+                result="incomplete",
+            )
+        )
+        stopping = self.gate.stop(
+            KIRO_OWNER, capture.capture_id, ["partial-event"], manifest_complete=True
+        )
+        self.gate.tick(now_ns=stopping.drain_deadline_ns)
+        due = self.gate.draining_captures_due(now_ns=stopping.drain_deadline_ns)
+        keys = frozenset(self.gate.expected_span_keys(capture.capture_id))
+        result = SimpleNamespace(
+            persisted_span_keys=keys,
+            storage="verified",
+            project_relay_id="project",
+            session_relay_id="session",
+        )
+        final = self.gate.complete_drain(due[0].capture_id, result)
+        self.assertEqual(final.state, "incomplete")
+        self.assertIn("kiro_incomplete_operation", final.gaps)
 
 
 class RecordingHttpTests(unittest.IsolatedAsyncioTestCase):
@@ -240,7 +421,7 @@ class RecordingHttpTests(unittest.IsolatedAsyncioTestCase):
         stop = dict(asdict(OWNER), capture_id=capture["capture_id"])
         response = await self.client.post("/v1/recordings/stop", json=stop)
         self.assertEqual(response.status_code, 200, response.text)
-        self.assertEqual(response.json()["state"], "incomplete")
+        self.assertEqual(response.json()["state"], "draining")
         await self.send(batch((4, OWNER, 0)))
         self.assertEqual(len(self.stored), 1)
         unrelated = batch((5, None, 0), source="unrelated")

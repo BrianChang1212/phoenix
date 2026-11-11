@@ -28,6 +28,8 @@ class SelectRecording(RecordingOwner):
 
 class StopRecording(RecordingOwner):
     capture_id: str = Field(min_length=36, max_length=36)
+    observed_event_ids: list[str] = Field(default_factory=list, max_length=10_000)
+    manifest_complete: bool = True
 
 
 def _gate(request: Request) -> RecordingGate:
@@ -74,7 +76,12 @@ async def stop_recording(body: StopRecording, request: Request) -> dict[str, Any
     gate = _gate(request)
     try:
         return asdict(
-            gate.stop(ConversationKey(body.source, body.conversation_id), body.capture_id)
+            gate.stop(
+                ConversationKey(body.source, body.conversation_id),
+                body.capture_id,
+                body.observed_event_ids,
+                manifest_complete=body.manifest_complete,
+            )
         )
     except (KeyError, ValueError) as error:
         raise HTTPException(404, "Recording not found for this conversation") from error

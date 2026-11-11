@@ -32,6 +32,7 @@ from phoenix.server.prometheus import (
     BULK_LOADER_EXCEPTIONS,
     BULK_LOADER_LAST_ACTIVITY,
     BULK_LOADER_SPAN_EXCEPTIONS,
+    RECORDING_SPANS_DROPPED,
     BULK_LOADER_SPAN_INSERTION_TIME,
     SPAN_INGESTION_FAILED_SPANS,
     SPAN_INGESTION_LAST_SUCCESS,
@@ -130,6 +131,8 @@ class BulkInserter:
         span_retry_max_delay_sec: float = 5.0,
         span_retry_allowance: int = 5,
         shutdown_drain_sec: float = 5.0,
+        managed_span_queue_limit: int = 10_000,
+        managed_span_max_age_sec: float = 120.0,
     ) -> None:
         """
         :param db: A function to initiate a new database session.
@@ -149,6 +152,9 @@ class BulkInserter:
         hold the batch until the database is reachable.
         :param shutdown_drain_sec: How long shutdown keeps writing queued spans and
         operations before cancelling and dropping what remains.
+        :param managed_span_queue_limit: Maximum recording spans retained by this writer.
+        :param managed_span_max_age_sec: Maximum time a recording span can remain queued,
+        including in a batch held during database connection failures.
         """
         self._db = db
         self._running = False
@@ -159,6 +165,16 @@ class BulkInserter:
         self._max_spans_queue_size = max_spans_queue_size
         self._spans: deque[tuple[Span, ProjectName]] = deque(initial_batch_of_spans)
         self._span_batch: list[tuple[Span, ProjectName]] = []
+        if managed_span_queue_limit < 1 or managed_span_max_age_sec <= 0:
+            raise ValueError("Managed span queue limits must be positive")
+        self._managed_span_queue_limit = managed_span_queue_limit
+        self._managed_span_max_age_sec = managed_span_max_age_sec
+        self._managed_span_deadlines: dict[int, float] = {}
+        for span, _ in self._spans:
+            if self._recording_capture_id(span):
+                self._managed_span_deadlines[id(span)] = (
+                    perf_counter() + self._managed_span_max_age_sec
+                )
         self._span_retry_attempts = 0
         self._span_limited_retries = 0
         self._span_retry_at = 0.0
@@ -227,7 +243,52 @@ class BulkInserter:
         cast("Queue[DataManipulation]", self._operations).put_nowait(operation)
 
     async def _enqueue_span(self, span: Span, project_name: str) -> None:
+        if self._recording_capture_id(span):
+            self._prune_expired_managed_spans()
+            if len(self._managed_span_deadlines) >= self._managed_span_queue_limit:
+                RECORDING_SPANS_DROPPED.labels(reason="capacity").inc()
+                return
+            self._managed_span_deadlines[id(span)] = (
+                perf_counter() + self._managed_span_max_age_sec
+            )
         self._spans.append((span, project_name))
+
+    @staticmethod
+    def _recording_capture_id(span: Span) -> Optional[str]:
+        recording = span.attributes.get("recording")
+        capture_id = (
+            recording.get("capture_id")
+            if isinstance(recording, dict)
+            else span.attributes.get("recording.capture_id")
+        )
+        return capture_id if isinstance(capture_id, str) and capture_id else None
+
+    def _forget_managed_spans(self, items: Iterable[tuple[Span, ProjectName]]) -> None:
+        for span, _ in items:
+            self._managed_span_deadlines.pop(id(span), None)
+
+    def _prune_expired_managed_spans(self, *, include_batch: bool = False) -> None:
+        now = perf_counter()
+        expired_ids = {
+            span_id
+            for span_id, deadline in self._managed_span_deadlines.items()
+            if deadline <= now
+        }
+        if not expired_ids:
+            return
+        queued_before = len(self._spans) + (len(self._span_batch) if include_batch else 0)
+        self._spans = deque(item for item in self._spans if id(item[0]) not in expired_ids)
+        if include_batch:
+            self._span_batch = [
+                item for item in self._span_batch if id(item[0]) not in expired_ids
+            ]
+        queued_after = len(self._spans) + (len(self._span_batch) if include_batch else 0)
+        removed = queued_before - queued_after
+        for span_id in expired_ids:
+            if not any(id(item[0]) == span_id for item in self._span_batch):
+                self._managed_span_deadlines.pop(span_id, None)
+        if removed:
+            RECORDING_SPANS_DROPPED.labels(reason="expired").inc(removed)
 
     async def _bulk_insert(self) -> None:
         assert isinstance(self._operations, Queue)
@@ -281,6 +342,7 @@ class BulkInserter:
             await sleep(sleep_delay)
 
     async def _insert_spans(self, num_spans_to_insert: int) -> None:
+        self._prune_expired_managed_spans(include_batch=True)
         if perf_counter() < self._span_retry_at:
             return
         if not self._span_batch:
@@ -402,11 +464,13 @@ class BulkInserter:
                     phase,
                     _span_error_locations(error),
                 )
+                self._forget_managed_spans(self._span_batch)
                 self._span_batch.clear()
                 self._span_retry_attempts = 0
                 self._span_limited_retries = 0
                 self._span_retry_at = 0.0
             return
+        self._forget_managed_spans(self._span_batch)
         self._span_batch.clear()
         self._span_retry_attempts = 0
         self._span_limited_retries = 0

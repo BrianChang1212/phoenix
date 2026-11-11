@@ -124,14 +124,16 @@ class _Metrics(NamedTuple):
     failed: MagicMock
     unresolved: MagicMock
     progress: MagicMock
+    managed_dropped: MagicMock
 
 
 @pytest.fixture
 def metrics(monkeypatch: pytest.MonkeyPatch) -> _Metrics:
-    patched = _Metrics(MagicMock(), MagicMock(), MagicMock())
+    patched = _Metrics(MagicMock(), MagicMock(), MagicMock(), MagicMock())
     monkeypatch.setattr(bulk_inserter, "SPAN_INGESTION_FAILED_SPANS", patched.failed)
     monkeypatch.setattr(bulk_inserter, "SPAN_INGESTION_UNRESOLVED_SPANS", patched.unresolved)
     monkeypatch.setattr(bulk_inserter, "SPAN_INGESTION_LAST_SUCCESS", patched.progress)
+    monkeypatch.setattr(bulk_inserter, "RECORDING_SPANS_DROPPED", patched.managed_dropped)
     return patched
 
 
@@ -410,6 +412,63 @@ async def test_connection_acquisition_failure_holds_batch_past_retry_limit(
             assert await session.scalar(select(func.count()).select_from(models.SpanCost)) == 2
     finally:
         await unavailable_engine.dispose()
+
+
+def test_managed_spans_expire_while_database_connection_is_unavailable(
+    monkeypatch: pytest.MonkeyPatch,
+    metrics: _Metrics,
+) -> None:
+    async def run() -> None:
+        clock = [100.0]
+        monkeypatch.setattr(bulk_inserter, "perf_counter", lambda: clock[0])
+
+        async def unavailable_connection() -> Any:
+            raise OSError("connection refused")
+
+        unavailable_engine = create_async_engine(
+            "sqlite+aiosqlite://", async_creator=unavailable_connection, poolclass=NullPool
+        )
+        managed = replace(
+            _span("managed"),
+            attributes={"recording.capture_id": "capture-id"},
+        )
+        inserter = _inserter(
+            DbSessionFactory(_db(unavailable_engine), "sqlite"),
+            managed,
+            managed_span_max_age_sec=5,
+        )
+        try:
+            await inserter._insert_spans(1)
+            assert [span.name for span, _ in inserter._span_batch] == ["managed"]
+            clock[0] = 106.0
+            await inserter._insert_spans(1)
+            assert not inserter._span_batch
+            assert not inserter.is_full
+            metrics.managed_dropped.labels.assert_called_once_with(reason="expired")
+            metrics.managed_dropped.labels.return_value.inc.assert_called_once_with(1)
+        finally:
+            await unavailable_engine.dispose()
+
+    asyncio.run(run())
+
+
+def test_managed_span_capacity_is_bounded_before_enqueue(metrics: _Metrics) -> None:
+    async def run() -> None:
+        first = replace(
+            _span("first"), attributes={"recording.capture_id": "capture-id"}
+        )
+        second = replace(
+            _span("second"), attributes={"recording.capture_id": "capture-id"}
+        )
+        inserter = _inserter(MagicMock(), managed_span_queue_limit=1)
+
+        await inserter._enqueue_span(first, "task-recordings")
+        await inserter._enqueue_span(second, "task-recordings")
+
+        assert [span.name for span, _ in inserter._spans] == ["first"]
+        metrics.managed_dropped.labels.assert_called_once_with(reason="capacity")
+
+    asyncio.run(run())
 
 
 @pytest.mark.parametrize("outcome", ["commit", "rollback", "cancel"])
