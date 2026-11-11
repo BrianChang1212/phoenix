@@ -145,6 +145,17 @@ export function Layout() {
   );
 }
 
+function ApplicationRouteOutlet() {
+  const frame = useOverlayFrame();
+  // Route drawers must subscribe after the portal host's initial registration.
+  if (frame && !frame.drawerHostElement) return <Loading />;
+  return (
+    <Suspense fallback={<Loading />}>
+      <Outlet />
+    </Suspense>
+  );
+}
+
 function ApplicationFrame() {
   const contentRef = useRef<HTMLDivElement>(null);
   const frame = useOverlayFrame();
@@ -237,9 +248,7 @@ function ApplicationFrame() {
                 inert={frame?.isViewportBlocked || undefined}
                 ref={contentRef}
               >
-                <Suspense fallback={<Loading />}>
-                  <Outlet />
-                </Suspense>
+                <ApplicationRouteOutlet />
               </div>
               <DrawerPlane css={drawerPlaneCellCSS} />
               <ViewportModalPlane css={viewportModalPlaneCellCSS} />
