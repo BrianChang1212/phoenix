@@ -715,8 +715,16 @@ class RecordingGate:
                     if span.end_time_unix_nano < capture.started_at_ns:
                         capture.gaps.add("completed_before_capture")
                         continue
-                    if source == "kiro" and _strings(span.attributes).get("kiro.result") == "incomplete":
-                        capture.gaps.add("kiro_incomplete_operation")
+                    if source == "kiro":
+                        span_attributes = _strings(span.attributes)
+                        if span_attributes.get("kiro.result") == "incomplete":
+                            capture.gaps.add("kiro_incomplete_operation")
+                        if (
+                            span_attributes.get("kiro.result") == "ambiguous"
+                            or span_attributes.get("kiro.record_kind")
+                            == "event observation; no operation duration"
+                        ):
+                            capture.gaps.add("kiro_unpaired_observation")
                     span_key = span.trace_id, span.span_id
                     if span_key in capture.admitted:
                         kept.append(self._map_span(span, capture))

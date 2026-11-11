@@ -54,7 +54,15 @@ def spans(request):
     return [s for r in request.resource_spans for group in r.scope_spans for s in group.spans]
 
 
-def kiro_batch(session_id, capture_id, index, event_id=None, source_event_ids=None, result=None):
+def kiro_batch(
+    session_id,
+    capture_id,
+    index,
+    event_id=None,
+    source_event_ids=None,
+    result=None,
+    record_kind=None,
+):
     request = ExportTraceServiceRequest()
     resource = request.resource_spans.add()
     resource.resource.attributes.add(key="openinference.project.name").value.string_value = "kiro-local"
@@ -74,6 +82,8 @@ def kiro_batch(session_id, capture_id, index, event_id=None, source_event_ids=No
         span.attributes.add(key="kiro.source_event_ids").value.string_value = ",".join(source_event_ids)
     if result:
         span.attributes.add(key="kiro.result").value.string_value = result
+    if record_kind:
+        span.attributes.add(key="kiro.record_kind").value.string_value = record_kind
     return request
 
 
@@ -159,6 +169,42 @@ class RecordingGateTests(unittest.TestCase):
         gate.tick(now_ns=now[0])
         due = gate.draining_captures_due(now_ns=now[0])
         self.assertEqual([item.capture_id for item in due], [capture.capture_id])
+
+    def test_hard_lease_expires_even_when_idle_deadline_is_later(self):
+        now = [1_000_000_000]
+        gate = RecordingGate(
+            clock_ns=lambda: now[0], idle_lease_sec=100, hard_limit_sec=5, drain_grace_sec=2
+        )
+        capture = gate.start(OWNER, "hard limit", str(uuid4()))
+        now[0] = capture.hard_deadline_ns
+        gate.tick(now_ns=now[0])
+        self.assertEqual(gate.status(OWNER, capture.capture_id).state, "draining")
+        self.assertIn("hard_limit_expired", gate.status(OWNER, capture.capture_id).gaps)
+
+    def test_truncated_kiro_manifest_keeps_readback_incomplete(self):
+        gate = RecordingGate()
+        capture = gate.start(KIRO_OWNER, "truncated manifest", str(uuid4()))
+        stopping = gate.stop(
+            KIRO_OWNER,
+            capture.capture_id,
+            observed_event_ids=["event-a"],
+            manifest_complete=False,
+        )
+        gate.admit(
+            kiro_batch(KIRO_OWNER.conversation_id, capture.capture_id, 1, event_id="event-a")
+        )
+        gate.tick(now_ns=stopping.drain_deadline_ns)
+        due = gate.draining_captures_due(now_ns=stopping.drain_deadline_ns)
+        result = SimpleNamespace(
+            persisted_span_keys=frozenset(gate.expected_span_keys(capture.capture_id)),
+            storage="verified",
+            project_relay_id="project",
+            session_relay_id="session",
+        )
+        final = gate.complete_drain(due[0].capture_id, result)
+        self.assertEqual(final.state, "incomplete")
+        self.assertFalse(final.manifest_complete)
+        self.assertIn("kiro_manifest_incomplete", final.gaps)
 
     def test_exact_primary_readback_is_required_before_timeline_url(self):
         gate = RecordingGate(timeline_origin="https://localhost:7443")
@@ -372,6 +418,45 @@ class RecordingGateTests(unittest.TestCase):
         final = self.gate.complete_drain(due[0].capture_id, result)
         self.assertEqual(final.state, "incomplete")
         self.assertIn("kiro_incomplete_operation", final.gaps)
+
+    def test_ambiguous_and_point_kiro_observations_cannot_be_verified(self):
+        for index, attributes, expected_gap in (
+            (1, {"result": "ambiguous"}, "kiro_unpaired_observation"),
+            (
+                2,
+                {"record_kind": "event observation; no operation duration"},
+                "kiro_unpaired_observation",
+            ),
+        ):
+            with self.subTest(attributes=attributes):
+                gate = RecordingGate()
+                capture = gate.start(KIRO_OWNER, "ambiguous hook", str(uuid4()))
+                gate.admit(
+                    kiro_batch(
+                        KIRO_OWNER.conversation_id,
+                        capture.capture_id,
+                        index,
+                        event_id=f"event-{index}",
+                        **attributes,
+                    )
+                )
+                stopping = gate.stop(
+                    KIRO_OWNER,
+                    capture.capture_id,
+                    [f"event-{index}"],
+                    manifest_complete=True,
+                )
+                gate.tick(now_ns=stopping.drain_deadline_ns)
+                due = gate.draining_captures_due(now_ns=stopping.drain_deadline_ns)
+                result = SimpleNamespace(
+                    persisted_span_keys=frozenset(gate.expected_span_keys(capture.capture_id)),
+                    storage="verified",
+                    project_relay_id="project",
+                    session_relay_id="session",
+                )
+                final = gate.complete_drain(due[0].capture_id, result)
+                self.assertEqual(final.state, "incomplete")
+                self.assertIn(expected_gap, final.gaps)
 
 
 class RecordingHttpTests(unittest.IsolatedAsyncioTestCase):
