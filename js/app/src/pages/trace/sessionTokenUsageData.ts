@@ -18,6 +18,7 @@ export type TokenUsage =
       kind: "available";
       counts: TokenCounts;
       scope: "model" | "turn" | "session";
+      provenance: ("model" | "turn")[];
       sourceSpanIds: string[];
     };
 
@@ -85,7 +86,13 @@ function readCounts(
     return { kind: "unavailable", reason: "快取輸入超出輸入用量" };
   if (counts.input == null && counts.output == null && counts.total == null)
     return { kind: "unavailable", reason: "來源未提供用量" };
-  return { kind: "available", counts, scope, sourceSpanIds: [] };
+  return {
+    kind: "available",
+    counts,
+    scope,
+    provenance: [scope],
+    sourceSpanIds: [],
+  };
 }
 
 export function getOperationTokenUsage(
@@ -128,6 +135,7 @@ function sumUsages(
 ): TokenUsage {
   const counts: TokenCounts = { input: 0, output: 0, total: 0, cacheRead: 0 };
   const sourceSpanIds: string[] = [];
+  const provenance = new Set<"model" | "turn">();
   for (const usage of usages) {
     if (usage.kind === "unavailable") return usage;
     if (usage.counts.total == null)
@@ -145,9 +153,16 @@ function sumUsages(
         return { kind: "unavailable", reason: "用量總數超出有效範圍" };
     }
     sourceSpanIds.push(...usage.sourceSpanIds);
+    usage.provenance.forEach((source) => provenance.add(source));
   }
   return usages.length
-    ? { kind: "available", counts, scope, sourceSpanIds }
+    ? {
+        kind: "available",
+        counts,
+        scope,
+        provenance: [...provenance],
+        sourceSpanIds,
+      }
     : { kind: "unavailable", reason: "來源未提供用量" };
 }
 

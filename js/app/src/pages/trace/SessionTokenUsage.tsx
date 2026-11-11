@@ -114,6 +114,12 @@ function TokenUsageCard({
       <details>
         <summary>用量來源</summary>
         <div>
+          來源層級：
+          {usage.provenance
+            .map((source) => (source === "model" ? "模型呼叫" : "輪次累計"))
+            .join("、")}
+        </div>
+        <div>
           {usage.scope === "model"
             ? "單次模型呼叫"
             : usage.scope === "turn"

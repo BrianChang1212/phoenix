@@ -132,6 +132,7 @@ describe("Session Token usage", () => {
       root.render(<SessionTokenSummary data={session} turnId="turn-1" />)
     );
     expect(container.textContent).toContain("輪次 Token340");
+    expect(container.textContent).toContain("來源層級：輪次累計");
     expect(container.textContent).not.toContain("460");
     const operation = session.operations[0];
     if (!operation) throw new Error("fixture requires a model");
