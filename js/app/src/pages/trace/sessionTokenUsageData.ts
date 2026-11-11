@@ -190,6 +190,24 @@ function latestTurnUsage(snapshots: SessionTimelineSpan[]): TokenUsage {
   return { ...usage, sourceSpanIds: [latest.id] };
 }
 
+function unassignedModelUsages({
+  models,
+  hasCumulative,
+}: {
+  models: SessionOperation[];
+  hasCumulative: boolean;
+}): TokenUsage[] {
+  const remaining = models.filter((operation) => operation.turnId == null);
+  if (remaining.length && hasCumulative)
+    return [
+      {
+        kind: "unavailable",
+        reason: "部分模型無法歸屬輪次，不提供 Session 總數",
+      },
+    ];
+  return remaining.map(getOperationTokenUsage);
+}
+
 export function getSessionTokenUsage({
   data,
   selectedTurnId,
@@ -241,8 +259,9 @@ export function getSessionTokenUsage({
       usages.push(...calls.map(getOperationTokenUsage));
     }
   }
-  const remaining = models.filter((operation) => operation.turnId == null);
-  usages.push(...remaining.map(getOperationTokenUsage));
+  usages.push(
+    ...unassignedModelUsages({ models, hasCumulative: cumulative.size > 0 })
+  );
   const modelIds = new Set(
     models.map((operation) => `${operation.traceId}:${operation.spanId}`)
   );

@@ -346,11 +346,20 @@ export function SessionTimeline({
   const [source, setSource] = useState("all");
   const [selectedTurnId, setSelectedTurnId] = useState<string | null>(null);
   const observedAt = useObservationTime(snapshotObservedAt);
+  const rawTurnIds = data.spans.flatMap((span) => {
+    if (span.name !== "run_turn" && span.name !== "session_task.turn")
+      return [];
+    const id = [span.attributes["turn.id"], span.attributes["turn_id"]].find(
+      (value): value is string =>
+        typeof value === "string" && value.trim().length > 0
+    );
+    return id ? [id] : [];
+  });
   const turns = [
     ...new Set(
-      data.operations.flatMap((operation) =>
-        operation.turnId ? [operation.turnId] : []
-      )
+      data.operations
+        .flatMap((operation) => (operation.turnId ? [operation.turnId] : []))
+        .concat(rawTurnIds)
     ),
   ];
   const effectiveTurnId =

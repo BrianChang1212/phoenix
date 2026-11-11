@@ -109,6 +109,73 @@ describe("SessionTimeline", () => {
     expect(container.textContent).toContain("沒有操作資料");
   });
 
+  it("zooms into reliable raw turns even when no operations were extracted", () => {
+    const envelopeData: SessionTimelineData = {
+      ...data,
+      source: "codex",
+      operations: [],
+      spans: [
+        {
+          id: "first-turn",
+          name: "run_turn",
+          context: { span_id: "first-turn", trace_id: "trace" },
+          parent_id: null,
+          span_kind: "UNKNOWN",
+          start_time: "2026-11-11T00:00:00Z",
+          end_time: "2026-11-11T00:00:01Z",
+          status_code: "UNSET",
+          attributes: { "turn.id": "turn-one" },
+          events: [],
+        },
+        {
+          id: "second-turn",
+          name: "session_task.turn",
+          context: { span_id: "second-turn", trace_id: "trace" },
+          parent_id: null,
+          span_kind: "UNKNOWN",
+          start_time: "2026-11-11T00:00:03Z",
+          end_time: "2026-11-11T00:00:05Z",
+          status_code: "UNSET",
+          attributes: {
+            turn_id: "turn-two",
+            "codex.turn.token_usage.input_tokens": 100,
+            "codex.turn.token_usage.output_tokens": 20,
+          },
+          events: [],
+        },
+      ],
+    };
+    act(() =>
+      root.render(
+        <MemoryRouter>
+          <SessionTimeline data={envelopeData} />
+        </MemoryRouter>
+      )
+    );
+    const select = container.querySelector<HTMLSelectElement>(
+      '[aria-label="輪次"]'
+    );
+    expect(select).not.toBeNull();
+    expect(select?.options.length).toBe(3);
+    act(() => {
+      if (select) {
+        select.value = "turn-two";
+        select.dispatchEvent(new Event("change", { bubbles: true }));
+      }
+    });
+    expect(container.textContent).toContain("輪次可觀測時間");
+    expect(container.textContent).toContain("2.00 秒");
+    expect(container.textContent).toContain("沒有操作資料");
+    expect(
+      container.querySelector('[aria-label="輪次 Token"]')?.textContent
+    ).toContain("120");
+    const overview = [...container.querySelectorAll("button")].find(
+      (button) => button.textContent === "返回總覽"
+    );
+    act(() => overview?.click());
+    expect(container.textContent).toContain("5.00 秒");
+  });
+
   it("selects parallel work without replacing complete operation duration and zooms into a reliable turn", () => {
     const parallelData: SessionTimelineData = {
       ...data,
