@@ -319,14 +319,15 @@ test-session-frontend-runner: ## Validate local frontend artifact runner
 	@$(SESSION_FRONTEND_PYTHON) -m unittest discover -s scripts/tests -p test_serve_session_frontend.py
 
 test-recording-gate: ## Verify the local recording receiver contract
-	@$(SESSION_FRONTEND_PYTHON) -c "import os, pathlib, subprocess, sys; source = str(pathlib.Path('src').resolve()); sys.exit(subprocess.call([sys.executable, '-m', 'unittest', 'discover', '-s', 'scripts/tests', '-p', 'test_recording_gate.py'], env=dict(os.environ, PYTHONPATH=source)))"
+	@$(SESSION_FRONTEND_PYTHON) -c "import os, pathlib, subprocess, sys; source = str(pathlib.Path('src').resolve()); sys.exit(subprocess.call([sys.executable, '-m', 'unittest', 'discover', '-s', 'scripts/tests', '-p', 'test_recording*.py'], env=dict(os.environ, PYTHONPATH=source)))"
 
-RECORDING_GATE_FILES := src/phoenix/server/recording.py src/phoenix/server/api/routers/v1/recordings.py src/phoenix/server/api/routers/v1/traces.py src/phoenix/server/api/routers/v1/__init__.py src/phoenix/server/app.py src/phoenix/server/grpc_server.py
+RECORDING_GATE_FILES := src/phoenix/server/recording.py src/phoenix/server/recording_readback.py src/phoenix/server/api/routers/v1/recordings.py src/phoenix/server/api/routers/v1/traces.py src/phoenix/server/api/routers/v1/__init__.py src/phoenix/server/app.py src/phoenix/server/grpc_server.py src/phoenix/db/bulk_inserter.py src/phoenix/server/prometheus.py
+RECORDING_GATE_TESTS := scripts/tests/test_recording_gate.py scripts/tests/test_recording_readback.py tests/unit/db/test_bulk_inserter.py
 
 check-recording-gate: ## Check recording receiver formatting, lint and types
-	@$(UV) run ruff check $(RECORDING_GATE_FILES) scripts/tests/test_recording_gate.py
-	@$(UV) run ruff format --check $(RECORDING_GATE_FILES) scripts/tests/test_recording_gate.py
-	@$(UV) run mypy --follow-imports=silent src/phoenix/server/recording.py src/phoenix/server/api/routers/v1/recordings.py
+	@$(UV) run ruff check $(RECORDING_GATE_FILES) $(RECORDING_GATE_TESTS)
+	@$(UV) run ruff format --check $(RECORDING_GATE_FILES) $(RECORDING_GATE_TESTS)
+	@$(UV) run mypy --follow-imports=silent src/phoenix/server/recording.py src/phoenix/server/recording_readback.py src/phoenix/server/api/routers/v1/recordings.py
 
 test-ts: ## Run all TypeScript tests (js/ workspace, including the app)
 	@echo -e "$(CYAN)Running TypeScript tests...$(NC)"
