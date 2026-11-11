@@ -54,7 +54,7 @@ const fixtures = values.project
   : [
       {
         project: "default",
-        sessionId: "01a1bbd4-398b-7bf2-89d8-d6d071a6d7c9",
+        sessionId: "01a1c9e2-0f28-7d90-9e11-7f7b0037e2a7",
         source: "codex",
       },
       {
@@ -119,6 +119,120 @@ async function readSessionSpans(session) {
   return result;
 }
 
+function rawCounts(span) {
+  const attributes = span.attributes;
+  const turn = span.name === "session_task.turn";
+  const prefix = "codex.turn.token_usage.";
+  const keys = turn
+    ? {
+        input: [prefix + "input_tokens"],
+        output: [prefix + "output_tokens"],
+        total: [prefix + "total_tokens"],
+        cache: [prefix + "cached_input_tokens"],
+      }
+    : {
+        input: ["llm.token_count.prompt", "gen_ai.usage.input_tokens"],
+        output: ["llm.token_count.completion", "gen_ai.usage.output_tokens"],
+        total: ["llm.token_count.total"],
+        cache: [
+          "llm.token_count.prompt_details.cache_read",
+          "gen_ai.usage.cache_read.input_tokens",
+        ],
+      };
+  const counts = {};
+  for (const [name, aliases] of Object.entries(keys)) {
+    const values = aliases
+      .map((key) => attributes[key])
+      .filter((value) => value != null);
+    if (
+      values.some((value) => !Number.isSafeInteger(value) || value < 0) ||
+      new Set(values).size > 1
+    )
+      return null;
+    counts[name] = values[0] ?? null;
+  }
+  if (counts.input != null && counts.output != null) {
+    const total = counts.input + counts.output;
+    if (
+      !Number.isSafeInteger(total) ||
+      (counts.total != null && counts.total !== total)
+    )
+      return null;
+    counts.total = total;
+  }
+  if (
+    counts.cache != null &&
+    counts.input != null &&
+    counts.cache > counts.input
+  )
+    return null;
+  return counts.total == null ? null : counts;
+}
+
+async function verifyVisibleUsage(card, spans) {
+  if (await card.getByText("無資料", { exact: true }).count()) {
+    return { availability: "unavailable", numeric_parity_verified: false };
+  }
+  const disclosure = card.locator("details");
+  await disclosure.locator("summary").click();
+  const sourceIds = (await disclosure.locator("div").last().innerText()).split(
+    " · "
+  );
+  assert(
+    sourceIds.length > 0 && new Set(sourceIds).size === sourceIds.length,
+    "Visible usage provenance must be nonempty and unique"
+  );
+  const sources = sourceIds.map((id) => spans.find((span) => span.id === id));
+  assert(
+    sources.every(Boolean),
+    "Visible usage source must belong to the selected Session"
+  );
+  const counts = sources.map(rawCounts);
+  assert(
+    counts.every(Boolean),
+    "Visible usage must be supported by valid raw span counts"
+  );
+  const sum = (field) =>
+    counts.every((count) => count[field] != null)
+      ? counts.reduce((value, count) => value + count[field], 0)
+      : null;
+  const total = sum("total");
+  const input = sum("input");
+  const output = sum("output");
+  const cache = sum("cache");
+  await card
+    .getByText(total.toLocaleString("en-US"), { exact: true })
+    .waitFor();
+  await card
+    .getByText(
+      `輸入 ${input == null ? "無資料" : input.toLocaleString("en-US")}`,
+      { exact: true }
+    )
+    .waitFor();
+  await card
+    .getByText(
+      `輸出 ${output == null ? "無資料" : output.toLocaleString("en-US")}`,
+      { exact: true }
+    )
+    .waitFor();
+  if (cache != null)
+    await card
+      .getByText(`快取 ${cache.toLocaleString("en-US")}（已含輸入）`, {
+        exact: true,
+      })
+      .waitFor();
+  await disclosure.locator("summary").click();
+  return {
+    availability: "available",
+    numeric_parity_verified: true,
+    source_spans: sources.length,
+    input,
+    output,
+    total,
+    cache_input: cache,
+  };
+}
+
 let browser;
 const report = { status: "running", base_url: base.href, sessions: [] };
 try {
@@ -172,7 +286,9 @@ try {
     const names = timeline.getByRole("button", { name: /^\d+ ·/ });
     const operationCount = await names.count();
     assert(operationCount > 0, "Timeline must expose selectable operations");
-    await names.first().click();
+    await names.first().focus();
+    await page.keyboard.press("Enter");
+    assert.equal(await names.first().getAttribute("aria-pressed"), "true");
     const href = await detail
       .getByRole("link", { name: "開啟原始 Trace", exact: true })
       .getAttribute("href");
@@ -213,6 +329,57 @@ try {
     await timeline
       .getByRole("button", { name: "暫停更新", exact: true })
       .click();
+    const stableUpdate = await timeline
+      .locator("time")
+      .getAttribute("datetime");
+    const failSelectedSessionOnce = async (route) => {
+      const pathname = decodeURIComponent(
+        new URL(route.request().url()).pathname
+      );
+      if (pathname.endsWith(`/v1/sessions/${session.id}`) && !injectedFaults) {
+        injectedFaults += 1;
+        await route.fulfill({
+          status: 503,
+          contentType: "application/json",
+          body: '{"error":"controlled validation fault"}',
+        });
+      } else await route.continue();
+    };
+    let injectedFaults = 0;
+    await page.route("**/v1/sessions/**", failSelectedSessionOnce);
+    await timeline
+      .getByRole("button", { name: "恢復更新", exact: true })
+      .click();
+    const staleAlert = timeline
+      .getByRole("alert")
+      .filter({ hasText: "更新失敗，保留上次資料" });
+    await staleAlert.waitFor();
+    assert.equal(
+      await detail.getByRole("heading", { level: 3 }).innerText(),
+      selectedTitle
+    );
+    assert.equal(
+      await timeline.locator("time").getAttribute("datetime"),
+      stableUpdate
+    );
+    await timeline
+      .getByRole("button", { name: "暫停更新", exact: true })
+      .click();
+    await page.unroute("**/v1/sessions/**", failSelectedSessionOnce);
+    await timeline
+      .getByRole("button", { name: "恢復更新", exact: true })
+      .click();
+    await page.waitForFunction((previous) => {
+      const time = document.querySelector(
+        'section[aria-label="Session 操作時間軸"] time'
+      );
+      return time && time.getAttribute("datetime") !== previous;
+    }, stableUpdate);
+    await staleAlert.waitFor({ state: "hidden" });
+    await timeline
+      .getByRole("button", { name: "暫停更新", exact: true })
+      .click();
+    assert.equal(injectedFaults, 1);
     const turnSelect = timeline.getByRole("combobox", {
       name: "輪次",
       exact: true,
@@ -245,7 +412,49 @@ try {
       );
       parallelVerified = true;
     }
-    await names.first().click();
+    const sessionUsage = await verifyVisibleUsage(
+      timeline.getByRole("region", { name: "Session Token", exact: true }),
+      spans
+    );
+    let modelUsage = {
+      availability: "not-observed",
+      numeric_parity_verified: false,
+    };
+    let screenshotOperation = 0;
+    for (let index = 0; index < operationCount; index += 1) {
+      await names.nth(index).focus();
+      await page.keyboard.press("Enter");
+      const modelHref = await detail
+        .getByRole("link", { name: "開啟原始 Trace", exact: true })
+        .getAttribute("href");
+      const modelId = new URL(modelHref, base).searchParams.get(
+        "selectedSpanNodeId"
+      );
+      const raw = spans.find((span) => span.id === modelId);
+      if (raw && raw.name !== "session_task.turn" && rawCounts(raw)) {
+        modelUsage = await verifyVisibleUsage(
+          detail.getByRole("region", { name: "操作 Token", exact: true }),
+          spans
+        );
+        assert(
+          modelUsage.numeric_parity_verified,
+          "A model with valid raw counts must display verifiable Token usage"
+        );
+        screenshotOperation = index;
+        break;
+      }
+    }
+    const rawModelUsageCandidates = spans.filter(
+      (span) =>
+        (span.name === "handle_responses" || span.span_kind === "LLM") &&
+        rawCounts(span)
+    ).length;
+    if (rawModelUsageCandidates)
+      assert(
+        modelUsage.numeric_parity_verified,
+        "Available model Token values must be verified in the timeline"
+      );
+    await names.nth(screenshotOperation).click();
     await timeline.screenshot({
       path: resolve(outputDir, `${fixture.source}-desktop.png`),
     });
@@ -253,6 +462,36 @@ try {
     await timeline.screenshot({
       path: resolve(outputDir, `${fixture.source}-narrow.png`),
     });
+    const returnToTimeline = page.url();
+    const traceLink = detail.getByRole("link", {
+      name: "開啟原始 Trace",
+      exact: true,
+    });
+    const traceHref = await traceLink.getAttribute("href");
+    const traceDataResponse = page.waitForResponse(
+      (response) =>
+        response.request().method() === "POST" &&
+        response.url().includes("/graphql") &&
+        response.request().postData()?.includes("TraceDetailsQuery")
+    );
+    await traceLink.click();
+    await page.waitForURL(
+      (current) => current.pathname === new URL(traceHref, base).pathname
+    );
+    const traceData = await (await traceDataResponse).json();
+    assert.equal(
+      traceData.errors?.length ?? 0,
+      0,
+      "Original Trace query must resolve without GraphQL errors"
+    );
+    assert(
+      traceData.data?.project?.trace,
+      "Original Trace must resolve actual data"
+    );
+    await page.goto(returnToTimeline);
+    await page
+      .getByRole("region", { name: "Session 操作時間軸", exact: true })
+      .waitFor();
     report.sessions.push({
       source: fixture.source,
       spans_read: spans.length,
@@ -261,6 +500,18 @@ try {
       raw_span_link_verified: true,
       selected_duration_verified: true,
       pause_resume_preserves_selection: true,
+      keyboard_selection_verified: true,
+      refresh_failure_retains_snapshot: true,
+      controlled_fault: {
+        status: 503,
+        injected: injectedFaults,
+        target: "selected-session-get",
+      },
+      refresh_recovery_verified: true,
+      raw_trace_navigation_verified: true,
+      session_token_check: sessionUsage,
+      model_token_check: modelUsage,
+      raw_model_usage_candidates: rawModelUsageCandidates,
       turn_zoom_verified: turnZoomVerified,
       parallel_verified: parallelVerified,
     });
