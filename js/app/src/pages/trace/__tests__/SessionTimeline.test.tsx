@@ -108,4 +108,83 @@ describe("SessionTimeline", () => {
     );
     expect(container.textContent).toContain("沒有操作資料");
   });
+
+  it("selects parallel work without replacing complete operation duration and zooms into a reliable turn", () => {
+    const parallelData: SessionTimelineData = {
+      ...data,
+      operations: [
+        {
+          ...data.operations[0],
+          id: "tool",
+          turnId: "turn-one",
+          startTime: 0,
+          endTime: 4000,
+        },
+        {
+          ...data.operations[1],
+          id: "model",
+          name: "model",
+          summary: "模型分析",
+          kind: "model",
+          status: "success",
+          turnId: "turn-one",
+          startTime: 2000,
+          endTime: 6000,
+        },
+        {
+          ...data.operations[1],
+          id: "last",
+          summary: "第二輪檢查",
+          turnId: "turn-two",
+          startTime: 8000,
+          endTime: 10000,
+        },
+      ],
+    };
+    act(() =>
+      root.render(
+        <MemoryRouter>
+          <SessionTimeline data={parallelData} />
+        </MemoryRouter>
+      )
+    );
+    const parallel = container.querySelector<HTMLButtonElement>(
+      '[aria-label="平行操作 · +2–4 秒"]'
+    );
+    expect(parallel).not.toBeNull();
+    act(() => parallel?.click());
+    const model = Array.from(
+      container.querySelectorAll<HTMLButtonElement>(
+        '[aria-label="平行操作選擇"] button'
+      )
+    ).find((button) => button.textContent?.includes("模型分析"));
+    act(() => model?.click());
+    const details = container.querySelector('[aria-label="操作詳細資訊"]');
+    expect(details?.textContent).toContain("模型分析");
+    expect(details?.textContent).toContain("4.00 秒");
+    const select = container.querySelector<HTMLSelectElement>(
+      '[aria-label="輪次"]'
+    );
+    expect(select).not.toBeNull();
+    act(() => {
+      if (select) {
+        select.value = "turn-two";
+        select.dispatchEvent(new Event("change", { bubbles: true }));
+      }
+    });
+    expect(
+      container.querySelector('[aria-label="單行時間軸"]')?.textContent
+    ).not.toContain("模型分析");
+    expect(
+      container
+        .querySelector('[aria-label="耗時分布"]')
+        ?.getAttribute("aria-label")
+    ).toBe("耗時分布");
+    expect(container.textContent).toContain("2.00 秒");
+    const overview = Array.from(
+      container.querySelectorAll<HTMLButtonElement>("button")
+    ).find((button) => button.textContent === "返回總覽");
+    act(() => overview?.click());
+    expect(select?.value).toBe("");
+  });
 });
