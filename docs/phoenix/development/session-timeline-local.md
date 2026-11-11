@@ -14,12 +14,43 @@ Sessions 列表的 Source 選單使用現有 Session DSL 在伺服器端篩選�
 
 ## 版本與部署限制
 
-2026-11-11 查核 source 與既有 venv 均標示 Phoenix 21.0.0，但 API 與前端可能不完全相同。資料轉接使用已實際查證的 Session／span REST 契約。修改 source 不會自動更新正在執行的 venv 服務；本票不變更正式資料庫、不停止現有服務。
+2026-11-11 查核 source 與既有 venv 均標示 Phoenix 21.0.0，但 API 與前端可能不完全相同。資料轉接使用已實際查證的 Session／span REST 契約。修改 source 不會自動更新正在執行的 venv 服務。以下工具已加入 source；實際產物、瀏覽器與正式切換結果須另由整合驗證紀錄佐證。
 
-基礎頁籤完成操作選取、完整名稱清單、起訖、耗時、狀態與原始 Trace 入口。平行區塊、耗時環圖、輪次放大、Token 與自動更新由後續票補齊。沒有取得 span 的 Session 顯示沒有操作資料，不補造示範值。
+目前已整合操作選取、完整名稱清單、起訖、耗時、可信狀態、原始 Trace、輪次放大、平行區間選取、聯集計時環圖、模型／輪次 Token 與自動更新。採 Apple 圓角排版、NVIDIA 黑灰綠配色。沒有資料不補造示範值；進行中操作使用暫時時間，缺少輪次或 Token 明示無資料。快取輸入與父層累計不重複加總，矛盾資料不提供猜測總數。
+
+自動更新在每次讀取完成後等待 5 秒；暫停會取消尚未完成的讀取，恢復立即更新。更新失敗保留最後成功資料與時間，顯示過期提示；選取、搜尋、來源、輪次與捲動位置保留。
+
+## 隔離建置與執行
+
+先依 repository Makefile 準備與建置前端相依套件。`PHOENIX_FRONTEND_OUT_DIR` 可指定全新產物的 `static` 目錄；指定時 Vite 不清空已有目錄。每次整合驗證使用新的產物目錄，避免覆寫既有證據。
+
+本功能未新增 GraphQL 查詢；依賴套件已建置、既有 Relay 產物可用後，以 `make build-session-frontend` 只建置 UI，避免重跑與本功能無關的全部 Relay 生成或套件 clean。上游 `build-frontend` 入口保留原行為。
+
+Windows worktree 共用套件 junction 時，native pnpm 自動重建曾破壞連結。本次隔離工具鏈以 Node 24.22.1、pnpm 12 frozen install 建置依賴，執行 script 則使用既有 pnpm 11.24.0 JavaScript launcher。`scripts/windows-pnpm/pnpm.cmd` 依 `PHOENIX_PNPM_NODE`、`PHOENIX_PNPM_CLI` 指向上述工具；暫停 manager 切換、自動依賴重建及 pre/post scripts。這只適用已準備好依賴的隔離環境，不取代正常安裝，也不更新 lockfile。停用 postbuild 時須保留相依套件 ESM package marker。
+
+先檢查產物，再用原安裝版 backend 執行新前端：
+
+```powershell
+python scripts/serve-session-frontend.py --server-dir <artifact-root> --check
+python scripts/serve-session-frontend.py --server-dir <artifact-root> -- serve --port 6007 --grpc-port 4318 --read-only
+```
+
+`<artifact-root>/static/.vite/manifest.json` 必須有 JavaScript 入口與完整本機 assets。檢查模式不 import Phoenix、不啟動服務；執行模式只在同一程序中替換 `phoenix.server.app.SERVER_DIR`。安裝版模板、全域 config、venv 與資料庫均不由此腳本修改。由啟動環境明確指定 loopback、獨立工作目錄、資料快照、外部資源與遙測限制，並使用既有 process guard 管理及停止測試服務。正式切換前完成獨立 review 與隔離頁面驗證；復原時停止客製程序，沿用原啟動入口。
+
+## 瀏覽器驗證工具
+
+```powershell
+node js/app/scripts/verify-session-timeline.mjs --base-url http://127.0.0.1:6007 --output-dir <new-evidence-directory>
+```
+
+工具只接受 loopback HTTP，使用專案 Playwright 與已安裝 Edge，預設選取已知非機密的 Codex／Kiro 驗證 Session。它從 Sessions 列表與 Source 選單進入 Timeline，比對所選操作的原始 span 連結與耗時，驗證暫停／恢復、選取保留，以及來源有資料時的輪次／平行操作。輸出桌面、窄視窗截圖及 `verification.json`；不輸出原始模型輸入或工具內容。輸出目錄必須為空，不覆寫既有證據。截圖是實際 runtime 驗證的產物，只有腳本語法通過不能視為頁面通過。
+
+可用 `--project`、`--session-id`、`--source codex|kiro` 指定其他已授權的驗證資料。測試結束會關閉本工具開啟的瀏覽器；服務生命週期仍由呼叫端的 process guard 管理。
 
 ## 驗證紀錄
 
-頁面選取與狀態測試、來源篩選條件保留測試，以及 REST 完整分頁／來源輪次繼承測試合計五項通過。來源篩選在尚未實作時先出現缺少模組的 RED；資料測試另實際抓到模型來源未繼承的 RED，修正後為 GREEN。
+票 01–04 分別已有資料／頁面、輪次與聯集計時、Token、即時更新的 RED→GREEN 紀錄。早期來源篩選曾以 DSL 字串後綴拆解造成截斷；目前 Source 使用獨立 URL 狀態，再於查詢邊界組合，使用者手寫條件不改寫。
 
-整體 TypeScript 檢查目前受尚未建置的 workspace phoenix-client／phoenix-evals 型別影響，錯誤位於既有 evals。新檔案的 lint 通過；真實瀏覽器與正式部署驗收須以後續整合紀錄為準。
+workspace phoenix-client／phoenix-evals 等相依套件準備後，全域 TypeScript 檢查已通過，不再將缺少建置產物列為阻擋。原始基準完整前端測試有 Windows zh-TW 時間格式兩項、路徑分隔符 snapshot 一項失敗，與本功能無關；不據此宣稱全套通過。
+
+`make test-frontend FRONTEND_TEST_ARGS="<focused filters> --maxWorkers=2"` 可執行限定前端測試；`make test-session-frontend-runner SESSION_FRONTEND_PYTHON=<python>` 驗證產物入口、資源完整性與同程序切換契約。Runner 測試使用獨立假 backend 驗證 CLI 邊界，不取代安裝版 Phoenix 的真實頁面驗證。最終可用性、實際產物與服務切換仍待整合驗收。

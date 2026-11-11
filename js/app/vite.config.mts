@@ -11,6 +11,7 @@ import relay from "vite-plugin-relay";
 // We default to not exporting source maps since the JS bundle gets added to the python package.
 // We however want to enable source maps on the containers for debugging purposes.
 const enableSourceMap = process.env.PHOENIX_ENABLE_SOURCE_MAP === "True";
+const frontendOutDir = process.env.PHOENIX_FRONTEND_OUT_DIR;
 
 export default defineConfig(() => {
   const plugins = [
@@ -86,8 +87,10 @@ export default defineConfig(() => {
     },
     build: {
       manifest: true,
-      outDir: resolve(__dirname, "../../src/phoenix/server/static"),
-      emptyOutDir: true,
+      outDir: frontendOutDir
+        ? resolve(frontendOutDir)
+        : resolve(__dirname, "../../src/phoenix/server/static"),
+      emptyOutDir: !frontendOutDir,
       sourcemap: enableSourceMap,
       rolldownOptions: {
         input: resolve(__dirname, "src/index.tsx"),
