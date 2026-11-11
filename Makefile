@@ -9,6 +9,8 @@ PNPM := pnpm
 UV := $(CURDIR)/scripts/uv.sh
 UV_BIN := uv
 NODE := node
+SESSION_FRONTEND_PYTHON ?= python
+FRONTEND_TEST_ARGS ?=
 
 # Directories
 APP_DIR := js/app
@@ -34,9 +36,9 @@ NC := \033[0m # No Color
 	graphql schema-graphql relay-build \
 	openapi schema-openapi schema-generative-ui ui-message-stream-fixtures codegen-python-client codegen-ts-client codegen-ts-app codegen-harbor-graphql \
 	dev dev-backend dev-frontend dev-docker dev-mock-llm \
-	test test-python test-frontend test-ts test-helm test-jcs doctest typecheck typecheck-python typecheck-python-ty typecheck-frontend typecheck-ts \
+	test test-python test-frontend test-session-frontend-runner test-ts test-helm test-jcs doctest typecheck typecheck-python typecheck-python-ty typecheck-frontend typecheck-ts \
 	format format-python format-frontend format-ts lint lint-python lint-frontend lint-ts clean-notebooks \
-	build build-python build-frontend build-ts \
+	build build-python build-frontend build-session-frontend build-ts \
 	skills skills-check codegen-prompts sync-models test-sync-models schema-ddl check-graphql-permissions check-filter-dsl-snippets check-skill-graphql-examples check-skill-filter-examples check-skill-python-examples check-skill-typescript-examples check-skill-px-commands sync-docs-snippets check-docs-snippets gen-otel-models \
 	test-integration-docs \
 	gh-comment-watch \
@@ -311,7 +313,10 @@ doctest: ## Run doctests across all modules in src/ (override with MODULES=...)
 
 test-frontend: ## Run frontend tests (js/app/)
 	@echo -e "$(CYAN)Running frontend tests...$(NC)"
-	@cd $(APP_DIR) && $(PNPM) test
+	@cd $(APP_DIR) && $(PNPM) test $(FRONTEND_TEST_ARGS)
+
+test-session-frontend-runner: ## Validate local frontend artifact runner
+	@$(SESSION_FRONTEND_PYTHON) -m unittest discover -s scripts/tests -p test_serve_session_frontend.py
 
 test-ts: ## Run all TypeScript tests (js/ workspace, including the app)
 	@echo -e "$(CYAN)Running TypeScript tests...$(NC)"
@@ -404,6 +409,9 @@ build-frontend: ## Build frontend for production
 	@echo -e "$(CYAN)Building frontend...$(NC)"
 	@cd $(JS_DIR) && $(PNPM) --filter 'phoenix-ui...' run --silent build
 	@echo -e "$(GREEN)✓ Done$(NC)"
+
+build-session-frontend: ## Build local UI using existing dependencies and Relay artifacts
+	@cd $(APP_DIR) && $(PNPM) exec vite build
 
 build-ts: ## Build all TypeScript (js/ workspace, including the app)
 	@echo -e "$(CYAN)Building TypeScript...$(NC)"
