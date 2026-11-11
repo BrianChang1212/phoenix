@@ -67,4 +67,6 @@ Ticket 03 仍須提供期限、程序異常收尾、持久 receipt、有限尾�
 
 `make check-recording-gate` 檢查所有修改 Python 檔案的 Ruff lint 與格式，並對新增 domain 與控制 router 執行 strict mypy。現有 `app.py` 與 `grpc_server.py` 的完整 typing 在此環境另受選用 `aioboto3` 缺失與 stub 版本影響。
 
-Windows 可將 `SESSION_FRONTEND_PYTHON` 指向既有 Phoenix venv 的 Python，並以 WSL `make` 執行。測試的 `PYTHONPATH` 必須包含此 worktree 的 `src`；檢查工具可安裝到此 worktree 的 `.audit/check-tools` 後加入 `PYTHONPATH`，不修改原服務 venv。
+Windows 可將 `SESSION_FRONTEND_PYTHON` 指向既有 Phoenix venv 的 Python，並以 WSL `make` 執行。測試命令使用該 Python 自行解析原生 `src` 路徑，再為測試程序設定 `PYTHONPATH`，呼叫端不須設定此變數。
+
+`check-recording-gate` 沿用 repo 的 `$(UV) run ruff` 與 `$(UV) run mypy`，使用 source 開發環境，不要求 Phoenix runtime venv 安裝檢查工具。WSL 須具備可用的 UV；`scripts/uv.sh` 須以 LF 換行保存，並能取得 `pyproject.toml` 指定的 UV 版本。
