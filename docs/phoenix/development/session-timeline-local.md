@@ -8,6 +8,8 @@ Session 的 REST 回應提供 project 與 Trace 關聯，時間軸依序讀完�
 
 可識別操作包含 TOOL、LLM、Codex dispatch phase，以及帶用量的 handle_responses。Session envelope、無用量的串流處理與 guardian 觀測不當成使用者操作。摘要只取已記錄的 Kiro 摘要；沒有摘要時明示不可用。原始 span 與 events 保留供輪次、用量及追溯功能使用。
 
+Kiro 明確標示 `event observation; no operation duration` 或提供 `kiro.observation_semantics` 的事件只保留為追溯資料，不列入操作數、操作清單或耗時分布。真實驗證 Session 的 7 個 spans 對應 3 個工具操作，不把 observation 再計為三次動作。
+
 來源與輪次只沿相同 Trace 的 parent span 關聯繼承，未知結果不轉為成功。工具傳輸事件中的 success 不是 shell 退出碼。
 
 Sessions 列表的 Source 選單使用現有 Session DSL 在伺服器端篩選，避免為標記來源而下載所有工作階段：Codex 以 run_turn、Kiro 以 kiro.session 或 kiro.observed_tool_window 作為已觀測 instrumentation 簽章。Unknown 表示這些簽章未被觀測到，不保證不存在其他來源。來源篩選會保留使用者原有條件，分頁仍由既有表格負責。
@@ -19,6 +21,30 @@ Sessions 列表的 Source 選單使用現有 Session DSL 在伺服器端篩選�
 目前已整合操作選取、完整名稱清單、起訖、耗時、可信狀態、原始 Trace、輪次放大、平行區間選取、聯集計時環圖、模型／輪次 Token 與自動更新。採 Apple 圓角排版、NVIDIA 黑灰綠配色。沒有資料不補造示範值；進行中操作使用暫時時間，缺少輪次或 Token 明示無資料。快取輸入與父層累計不重複加總，矛盾資料不提供猜測總數。
 
 自動更新在每次讀取完成後等待 5 秒；暫停會取消尚未完成的讀取，恢復立即更新。更新失敗保留最後成功資料與時間，顯示過期提示；選取、搜尋、來源、輪次與捲動位置保留。
+
+初次直接開啟 Session URL 時，Layout 會等共用 DrawerPlane 註冊後，才在 route Suspense 中掛載 Outlet；沒有 OverlayFrame 的使用方式保留原本 fallback。這避免 Drawer 在初次載入取得 null host 後持續不顯示。已以真正 document load、原始 Trace 導航後返回驗證，不依賴點擊分頁或調整視窗補救。
+
+## 已部署的本機版本
+
+2026-11-11 技術部署與實際 `http://127.0.0.1:6006` 驗證已通過；使用者視覺驗收仍待確認。前端由 source commit `fef9baf5b` 建置，release 為 `D:/Brian/tools/phoenix/frontend-releases/20261111-sessions-fef9baf5b`。產物內保存相同 Python runner，沿用原安裝版 Phoenix 21.0.0 backend；沒有覆寫原 venv 或資料庫。
+
+新入口為 `D:/Brian/tools/phoenix/start-sessions.ps1`，保留 loopback 6006／4317 與原資料設定，並停用 migrations。原 `start.ps1` 保留作復原入口。服務已停止時可啟動新版：
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File D:\Brian\tools\phoenix\start-sessions.ps1
+```
+
+復原舊前端時，先停止受管理服務並確認 6006／4317 監聽已停止，再啟動原入口；不刪除或搬移 release、資料庫、venv：
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File D:\Brian\tools\phoenix\stop.ps1
+powershell -NoProfile -ExecutionPolicy Bypass -File D:\Brian\tools\phoenix\start.ps1
+```
+
+以下是此工作站的本機證據，不是可攜發布連結；release 的程式碼來源保持 `fef9baf5b`，後續文件提交不代表重建前端：
+
+- [Release 來源與 SHA-256 收據（local only）](/D:/Brian/tools/phoenix/frontend-releases/20261111-sessions-fef9baf5b/release-receipt.json)
+- [6006 實際驗收收據（local only）](/D:/Brian/tools/phoenix/frontend-releases/20261111-sessions-fef9baf5b/verification-live/verification.json)
 
 ## 隔離建置與執行
 
@@ -55,4 +81,6 @@ node js/app/scripts/verify-session-timeline.mjs --base-url http://127.0.0.1:6007
 
 workspace phoenix-client／phoenix-evals 等相依套件準備後，全域 TypeScript 檢查已通過，不再將缺少建置產物列為阻擋。原始基準完整前端測試有 Windows zh-TW 時間格式兩項、路徑分隔符 snapshot 一項失敗，與本功能無關；不據此宣稱全套通過。
 
-`make test-frontend FRONTEND_TEST_ARGS="<focused filters> --maxWorkers=2"` 可執行限定前端測試；`make test-session-frontend-runner SESSION_FRONTEND_PYTHON=<python>` 驗證產物入口、資源完整性與同程序切換契約。Runner 測試使用獨立假 backend 驗證 CLI 邊界，不取代安裝版 Phoenix 的真實頁面驗證。最終可用性、實際產物與服務切換仍待整合驗收。
+`make test-frontend FRONTEND_TEST_ARGS="<focused filters> --maxWorkers=2"` 可執行限定前端測試；`make test-session-frontend-runner SESSION_FRONTEND_PYTHON=<python>` 驗證產物入口、資源完整性與同程序切換契約。Runner 測試使用獨立假 backend 驗證 CLI 邊界，不取代安裝版 Phoenix 的真實頁面驗證。
+
+本次限定來源測試 35 項、runner 5 項、全域 TypeScript 與獨立 review 已通過。隔離候選及實際 6006 服務均通過 Codex／Kiro 完整 driver：Codex 實讀 4,396 spans、15 操作，Session Token 146,965 與所選模型 Token 29,113 已對照原始來源；Kiro 實讀 7 spans、3 操作，Token 無資料。兩者均通過鍵盤、暫停／恢復、單次受控 503 保留與恢復、原始 Trace 導航及直接返回。這些是技術驗證，使用者是否接受畫面仍由人工確認。
