@@ -20,6 +20,7 @@ from phoenix.config import (
     get_env_tls_enabled_for_grpc,
 )
 from phoenix.server.bearer_auth import ApiKeyInterceptor
+from phoenix.server.recording import RecordingGate, managed_source
 from phoenix.trace.otel import decode_otlp_span
 from phoenix.trace.schemas import Span
 from phoenix.utilities.project import get_project_name
@@ -34,22 +35,38 @@ class Servicer(TraceServiceServicer):  # type: ignore[misc,unused-ignore]
     def __init__(
         self,
         enqueue_span: Callable[[Span, ProjectName], Awaitable[None]],
+        recording_gate: Optional[RecordingGate] = None,
     ) -> None:
         super().__init__()
         self._enqueue_span = enqueue_span
+        self._recording_gate = recording_gate
 
     async def Export(
         self,
         request: ExportTraceServiceRequest,
         context: RpcContext,
     ) -> ExportTraceServiceResponse:
+        rejected = 0
         for resource_spans in request.resource_spans:
             project_name = get_project_name(resource_spans.resource.attributes)
             for scope_span in resource_spans.scope_spans:
                 for otlp_span in scope_span.spans:
+                    if (
+                        self._recording_gate is not None
+                        and managed_source(
+                            resource_spans.resource.attributes, scope_span.scope.name, otlp_span
+                        )
+                        is not None
+                    ):
+                        rejected += 1
+                        continue
                     span = await run_in_threadpool(decode_otlp_span, otlp_span)
                     await self._enqueue_span(span, project_name)
-        return ExportTraceServiceResponse()
+        response = ExportTraceServiceResponse()
+        if rejected:
+            response.partial_success.rejected_spans = rejected
+            response.partial_success.error_message = "Managed recording spans require OTLP HTTP"
+        return response
 
 
 class GrpcServer:
@@ -63,6 +80,7 @@ class GrpcServer:
         disabled: bool = False,
         token_store: Optional[CanReadToken] = None,
         interceptors: Iterable[ServerInterceptor] = (),
+        recording_gate: Optional[RecordingGate] = None,
     ) -> None:
         self._enqueue_span = enqueue_span
         self._server: Optional[Server] = None
@@ -73,6 +91,7 @@ class GrpcServer:
         self._bind_address = _bind_address(host, port)
         self._token_store = token_store
         self._interceptors = list(interceptors)
+        self._recording_gate = recording_gate
 
     async def __aenter__(self) -> None:
         interceptors = self._interceptors
@@ -109,7 +128,9 @@ class GrpcServer:
             server.add_secure_port(self._bind_address, server_credentials)
         else:
             server.add_insecure_port(self._bind_address)
-        add_TraceServiceServicer_to_server(Servicer(self._enqueue_span), server)  # type: ignore[no-untyped-call,unused-ignore]
+        add_TraceServiceServicer_to_server(
+            Servicer(self._enqueue_span, self._recording_gate), server
+        )  # type: ignore[no-untyped-call,unused-ignore]
         await server.start()
         self._server = server
 

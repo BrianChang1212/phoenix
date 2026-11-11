@@ -318,6 +318,16 @@ test-frontend: ## Run frontend tests (js/app/)
 test-session-frontend-runner: ## Validate local frontend artifact runner
 	@$(SESSION_FRONTEND_PYTHON) -m unittest discover -s scripts/tests -p test_serve_session_frontend.py
 
+test-recording-gate: ## Verify the local recording receiver contract
+	@$(SESSION_FRONTEND_PYTHON) -m unittest discover -s scripts/tests -p test_recording_gate.py
+
+RECORDING_GATE_FILES := src/phoenix/server/recording.py src/phoenix/server/api/routers/v1/recordings.py src/phoenix/server/api/routers/v1/traces.py src/phoenix/server/api/routers/v1/__init__.py src/phoenix/server/app.py src/phoenix/server/grpc_server.py
+
+check-recording-gate: ## Check recording receiver formatting, lint and types
+	@$(SESSION_FRONTEND_PYTHON) -m ruff check $(RECORDING_GATE_FILES) scripts/tests/test_recording_gate.py
+	@$(SESSION_FRONTEND_PYTHON) -m ruff format --check $(RECORDING_GATE_FILES) scripts/tests/test_recording_gate.py
+	@$(SESSION_FRONTEND_PYTHON) -m mypy --follow-imports=silent src/phoenix/server/recording.py src/phoenix/server/api/routers/v1/recordings.py
+
 test-ts: ## Run all TypeScript tests (js/ workspace, including the app)
 	@echo -e "$(CYAN)Running TypeScript tests...$(NC)"
 	@cd $(JS_DIR) && $(PNPM) run test

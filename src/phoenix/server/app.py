@@ -168,6 +168,7 @@ from phoenix.server.monty_runtime import MontyRuntime
 from phoenix.server.oauth2 import OAuth2Clients
 from phoenix.server.oauth2_authorization_server import public_origin
 from phoenix.server.prometheus import SPAN_QUEUE_REJECTIONS
+from phoenix.server.recording import RecordingGate
 from phoenix.server.redaction import Redactor, current_redactor
 from phoenix.server.retention import TraceDataSweeper
 from phoenix.server.sandbox._download import prefetch_wasm_binary_if_needed
@@ -736,6 +737,7 @@ def _lifespan(
                 enable_prometheus=enable_prometheus,
                 token_store=token_store,
                 interceptors=interceptors,
+                recording_gate=getattr(app.state, "recording_gate", None),
             )
             await stack.enter_async_context(grpc_server)
             await stack.enter_async_context(dml_event_handler)
@@ -1015,6 +1017,7 @@ def create_app(
     allowed_origins: Optional[list[str]] = None,
     management_url: Optional[str] = None,
     welcome_message: Optional[_WelcomeMessage] = None,
+    recording_gate: Optional[RecordingGate] = None,
 ) -> FastAPI:
     if grpc_host is None:
         grpc_host = get_env_host()
@@ -1210,6 +1213,10 @@ def create_app(
             "defaultModelsExpandDepth": -1,  # hides the schema section in the Swagger UI
         },
     )
+    if recording_gate is not None or os.environ.get("PHOENIX_RECORDING_ENABLED") == "true":
+        if int(os.environ.get("WEB_CONCURRENCY", "1")) != 1:
+            raise ValueError("Recording requires exactly one Phoenix worker")
+        app.state.recording_gate = recording_gate or RecordingGate()
     app.include_router(create_v1_router(authentication_enabled))
     app.include_router(create_client_errors_router(authentication_enabled))
     if not get_env_disable_agent_assistant():

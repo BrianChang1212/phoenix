@@ -45,6 +45,7 @@ from phoenix.server.authorization import (
 )
 from phoenix.server.bearer_auth import PhoenixUser
 from phoenix.server.dml_event import SpanDeleteEvent, TraceAnnotationInsertEvent
+from phoenix.server.recording import RECORDING_PROJECT, RecordingGate, managed_source
 from phoenix.server.trace_filters import TraceFilterConditionError, apply_trace_filter_to_page
 from phoenix.trace.otel import decode_otlp_span
 from phoenix.utilities.project import get_project_name
@@ -475,10 +476,29 @@ async def post_traces(
             detail=f"Unsupported content encoding: {content_encoding}",
             status_code=415,
         )
-    body = await request.body()
-    if content_encoding == "gzip":
+    gate = getattr(request.app.state, "recording_gate", None)
+    if isinstance(gate, RecordingGate):
+        bounded_body = bytearray()
+        async for chunk in request.stream():
+            if len(bounded_body) + len(chunk) > gate.max_request_bytes:
+                raise HTTPException(413, "Recording receiver request limit exceeded")
+            bounded_body.extend(chunk)
+        body = bytes(bounded_body)
+        if content_encoding:
+            decoder = zlib.decompressobj(31 if content_encoding == "gzip" else 15)
+            try:
+                body = decoder.decompress(body, gate.max_request_bytes + 1)
+            except zlib.error as error:
+                raise HTTPException(422, "Invalid compressed trace request") from error
+            if len(body) > gate.max_request_bytes or decoder.unconsumed_tail:
+                raise HTTPException(413, "Recording receiver decoded request limit exceeded")
+            if not decoder.eof or decoder.unused_data:
+                raise HTTPException(422, "Incomplete or concatenated compressed trace request")
+    else:
+        body = await request.body()
+    if not isinstance(gate, RecordingGate) and content_encoding == "gzip":
         body = await run_in_threadpool(gzip.decompress, body)
-    elif content_encoding == "deflate":
+    elif not isinstance(gate, RecordingGate) and content_encoding == "deflate":
         body = await run_in_threadpool(zlib.decompress, body)
     req = ExportTraceServiceRequest()
     try:
@@ -488,7 +508,11 @@ async def post_traces(
             detail="Request body is invalid ExportTraceServiceRequest",
             status_code=422,
         )
-    background_tasks.add_task(_add_spans, req, request.state, x_project_name)
+    if isinstance(gate, RecordingGate):
+        req = gate.admit(req)
+    background_tasks.add_task(
+        _add_spans, req, request.state, x_project_name, isinstance(gate, RecordingGate)
+    )
 
     # "The server MUST use the same Content-Type in the response as it received in the request"
     response_message = ExportTraceServiceResponse()
@@ -698,6 +722,7 @@ async def _add_spans(
     req: ExportTraceServiceRequest,
     state: State,
     project_name_header: Optional[str] = None,
+    recording_enabled: bool = False,
 ) -> None:
     """Ingest spans from an OTLP ExportTraceServiceRequest.
 
@@ -716,7 +741,16 @@ async def _add_spans(
         for scope_span in resource_spans.scope_spans:
             for otlp_span in scope_span.spans:
                 span = await run_in_threadpool(decode_otlp_span, otlp_span)
-                await state.enqueue_span(span, project_name)
+                target_project = (
+                    RECORDING_PROJECT
+                    if recording_enabled
+                    and managed_source(
+                        resource_spans.resource.attributes, scope_span.scope.name, otlp_span
+                    )
+                    is not None
+                    else project_name
+                )
+                await state.enqueue_span(span, target_project)
 
 
 class TransferTracesRequestBody(V1RoutesBaseModel):
