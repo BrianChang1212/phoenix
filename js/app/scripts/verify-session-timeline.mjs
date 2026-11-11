@@ -134,8 +134,18 @@ try {
     const session = await findSession(fixture);
     const spans = await readSessionSpans(session);
     await page.setViewportSize({ width: 1440, height: 1100 });
+    const timeRange = new URLSearchParams({
+      timeRangeStart: new Date(
+        Date.parse(session.start_time) - 60000
+      ).toISOString(),
+      timeRangeEnd: new Date(
+        Date.parse(session.end_time) + 60000
+      ).toISOString(),
+    });
     await page.goto(
-      url(`/projects/${encodeURIComponent(session.project_id)}/sessions`)
+      url(
+        `/projects/${encodeURIComponent(session.project_id)}/sessions?${timeRange}`
+      )
     );
     await page
       .getByRole("combobox", { name: "Session source", exact: true })
