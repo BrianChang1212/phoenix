@@ -7,6 +7,7 @@ import {
   type SessionOperation,
   type SessionTimelineData,
 } from "./sessionTimelineData";
+import { OperationTokenUsage, SessionTokenSummary } from "./SessionTokenUsage";
 
 const timelineCSS = css`
   padding: 24px;
@@ -166,6 +167,7 @@ export function SessionTimeline({ data }: { data: SessionTimelineData }) {
   return (
     <section css={timelineCSS} aria-label="Session 操作時間軸">
       <h2>操作時間軸</h2>
+      <SessionTokenSummary data={data} />
       <div className="timeline-controls">
         <input
           aria-label="搜尋操作"
@@ -234,6 +236,7 @@ export function SessionTimeline({ data }: { data: SessionTimelineData }) {
               aria-live="polite"
             >
               <h3>{selected.summary ?? selected.name}</h3>
+              <OperationTokenUsage operation={selected} />
               {!selected.summary && (
                 <p className="timeline-muted">摘要不可用 · {selected.name}</p>
               )}
