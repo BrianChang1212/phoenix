@@ -234,15 +234,16 @@ async function verifyVisibleUsage(card, spans) {
 }
 
 let browser;
+let page;
+const pageErrors = [];
 const report = { status: "running", base_url: base.href, sessions: [] };
 try {
   browser = await chromium.launch({ channel: values.channel, headless: true });
   const context = await browser.newContext({
     viewport: { width: 1440, height: 1100 },
   });
-  const page = await context.newPage();
+  page = await context.newPage();
   page.setDefaultTimeout(30000);
-  const pageErrors = [];
   page.on("pageerror", (error) => pageErrors.push(error.name));
   for (const fixture of fixtures) {
     const session = await findSession(fixture);
@@ -455,14 +456,47 @@ try {
         "Available model Token values must be verified in the timeline"
       );
     await names.nth(screenshotOperation).click();
+    await timeline.evaluate((element) => {
+      element.scrollTop = 0;
+    });
     await timeline.screenshot({
       path: resolve(outputDir, `${fixture.source}-desktop.png`),
     });
     await page.setViewportSize({ width: 390, height: 844 });
+    await timeline.evaluate((element) => {
+      element.scrollTop = 0;
+    });
     await timeline.screenshot({
       path: resolve(outputDir, `${fixture.source}-narrow.png`),
     });
     const returnToTimeline = page.url();
+    await page.setViewportSize({ width: 1440, height: 1100 });
+    const sessionReport = {
+      source: fixture.source,
+      spans_read: spans.length,
+      operations_visible: operationCount,
+      selected_elapsed_seconds: elapsedSeconds,
+      raw_span_link_verified: true,
+      selected_duration_verified: true,
+      pause_resume_preserves_selection: true,
+      keyboard_selection_verified: true,
+      refresh_failure_retains_snapshot: true,
+      controlled_fault: {
+        status: 503,
+        injected: injectedFaults,
+        target: "selected-session-get",
+      },
+      refresh_recovery_verified: true,
+      raw_trace_navigation_verified: false,
+      return_to_timeline_verified: false,
+      session_token_check: sessionUsage,
+      model_token_check: modelUsage,
+      raw_model_usage_candidates: rawModelUsageCandidates,
+      turn_zoom_verified: turnZoomVerified,
+      parallel_verified: parallelVerified,
+    };
+    report.sessions.push(sessionReport);
+    report.current_stage = "original-trace-navigation";
     const traceLink = detail.getByRole("link", {
       name: "開啟原始 Trace",
       exact: true,
@@ -488,33 +522,13 @@ try {
       traceData.data?.project?.trace,
       "Original Trace must resolve actual data"
     );
+    sessionReport.raw_trace_navigation_verified = true;
+    report.current_stage = "return-to-timeline";
     await page.goto(returnToTimeline);
     await page
       .getByRole("region", { name: "Session 操作時間軸", exact: true })
       .waitFor();
-    report.sessions.push({
-      source: fixture.source,
-      spans_read: spans.length,
-      operations_visible: operationCount,
-      selected_elapsed_seconds: elapsedSeconds,
-      raw_span_link_verified: true,
-      selected_duration_verified: true,
-      pause_resume_preserves_selection: true,
-      keyboard_selection_verified: true,
-      refresh_failure_retains_snapshot: true,
-      controlled_fault: {
-        status: 503,
-        injected: injectedFaults,
-        target: "selected-session-get",
-      },
-      refresh_recovery_verified: true,
-      raw_trace_navigation_verified: true,
-      session_token_check: sessionUsage,
-      model_token_check: modelUsage,
-      raw_model_usage_candidates: rawModelUsageCandidates,
-      turn_zoom_verified: turnZoomVerified,
-      parallel_verified: parallelVerified,
-    });
+    sessionReport.return_to_timeline_verified = true;
   }
   assert.equal(
     pageErrors.length,
@@ -522,9 +536,23 @@ try {
     "Page must not raise uncaught JavaScript errors"
   );
   report.status = "passed";
+  report.current_stage = "complete";
 } catch (error) {
   report.status = "failed";
   report.error = error instanceof Error ? error.message : String(error);
+  if (page && !page.isClosed()) {
+    report.failure_page = {
+      url: page.url(),
+      tabs: await page.getByRole("tab").evaluateAll((elements) =>
+        elements.map((element) => ({
+          label:
+            element.getAttribute("aria-label") ?? element.textContent?.trim(),
+          selected: element.getAttribute("aria-selected"),
+        }))
+      ),
+      page_errors: pageErrors,
+    };
+  }
   process.exitCode = 1;
 } finally {
   await browser?.close();
