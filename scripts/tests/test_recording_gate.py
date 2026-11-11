@@ -25,6 +25,7 @@ from phoenix.server.types import DbSessionFactory
 
 OWNER = ConversationKey("codex", "019a74e9-a998-7320-abcd-012345678901")
 OTHER = ConversationKey("codex", "019a74e9-a998-7320-abcd-012345678902")
+KIRO_OWNER = ConversationKey("kiro", "kiro-session")
 
 
 def batch(*specs, source="codex"):
@@ -49,6 +50,23 @@ def batch(*specs, source="codex"):
 
 def spans(request):
     return [s for r in request.resource_spans for group in r.scope_spans for s in group.spans]
+
+
+def kiro_batch(session_id, capture_id, index):
+    request = ExportTraceServiceRequest()
+    resource = request.resource_spans.add()
+    resource.resource.attributes.add(key="openinference.project.name").value.string_value = "kiro-local"
+    scope = resource.scope_spans.add()
+    span = scope.spans.add(
+        trace_id=b"k" * 16,
+        span_id=index.to_bytes(8, "big"),
+        name="execute_pwsh",
+        start_time_unix_nano=time.time_ns(),
+        end_time_unix_nano=time.time_ns() + 1,
+    )
+    span.attributes.add(key="session.id").value.string_value = session_id
+    span.attributes.add(key="recording.capture_id").value.string_value = capture_id
+    return request
 
 
 class RecordingGateTests(unittest.TestCase):
@@ -162,6 +180,17 @@ class RecordingGateTests(unittest.TestCase):
     def test_worker_integer_is_not_a_conversation_owner(self):
         self.start()
         self.assertEqual(spans(self.gate.admit(batch((1, None, 0)))), [])
+
+    def test_kiro_events_must_match_the_active_capture_id(self):
+        first = self.gate.start(KIRO_OWNER, "first", str(uuid4()))
+        admitted = spans(self.gate.admit(kiro_batch(KIRO_OWNER.conversation_id, first.capture_id, 1)))
+        self.assertEqual(len(admitted), 1)
+        self.gate.stop(KIRO_OWNER, first.capture_id)
+        second = self.gate.start(KIRO_OWNER, "second", str(uuid4()))
+        self.assertEqual(spans(self.gate.admit(kiro_batch(KIRO_OWNER.conversation_id, first.capture_id, 2))), [])
+        self.assertEqual(self.gate.status(KIRO_OWNER, second.capture_id).queued_spans, 0)
+        self.assertEqual(len(spans(self.gate.admit(kiro_batch(KIRO_OWNER.conversation_id, second.capture_id, 3)))), 1)
+        self.assertEqual(self.gate.receiver_gaps["kiro:capture_mismatch"], 1)
 
 
 class RecordingHttpTests(unittest.IsolatedAsyncioTestCase):

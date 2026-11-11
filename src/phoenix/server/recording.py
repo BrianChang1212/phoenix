@@ -190,7 +190,7 @@ class RecordingGate:
                         )
                     )
         over_limit = len(observations) > self.max_batch_spans
-        evidence: dict[tuple[Source, bytes, bytes], tuple[Span, Optional[str]]] = {}
+        evidence: dict[tuple[Source, bytes, bytes], tuple[Span, Optional[str], Optional[str]]] = {}
         conflicts: set[tuple[Source, bytes, bytes]] = set()
         if not over_limit:
             for _, _, span, source in observations:
@@ -202,13 +202,26 @@ class RecordingGate:
                     if a.key == ("conversation.id" if source == "codex" else "session.id")
                 ]
                 identity = values[0] if values else None
+                capture_ids = [
+                    a.value.string_value
+                    for a in span.attributes
+                    if a.key == "recording.capture_id"
+                ]
+                capture_id = capture_ids[0] if capture_ids else None
                 key = source, span.trace_id, span.span_id
-                if len(set(values)) > 1 or (key in evidence and evidence[key][0] != span):
+                if (
+                    len(set(values)) > 1
+                    or len(set(capture_ids)) > 1
+                    or (key in evidence and evidence[key][0] != span)
+                ):
                     conflicts.add(key)
-                evidence[key] = span, identity
+                evidence[key] = span, identity, capture_id
 
-        def owner_of(source: Source, span: Span) -> Optional[ConversationKey]:
+        def owner_of(
+            source: Source, span: Span
+        ) -> Optional[tuple[ConversationKey, Optional[str]]]:
             owners = set()
+            capture_ids = set()
             seen = set()
             current = span
             for _ in range(self.max_ancestor_depth):
@@ -216,15 +229,23 @@ class RecordingGate:
                 if key in seen or key in conflicts:
                     return None
                 seen.add(key)
-                _, identity = evidence[key]
+                _, identity, capture_id = evidence[key]
                 if identity:
                     try:
                         owners.add(ConversationKey(source, identity))
                     except ValueError:
                         return None
+                if capture_id:
+                    capture_ids.add(capture_id)
+                    if len(capture_ids) > 1:
+                        return None
                 parent_key = source, current.trace_id, current.parent_span_id
                 if not current.parent_span_id or parent_key not in evidence:
-                    return next(iter(owners)) if len(owners) == 1 else None
+                    return (
+                        (next(iter(owners)), next(iter(capture_ids), None))
+                        if len(owners) == 1
+                        else None
+                    )
                 current = evidence[parent_key][0]
             return None
 
@@ -242,12 +263,16 @@ class RecordingGate:
                     if over_limit:
                         self._gap(source, "batch_limit")
                         continue
-                    owner = owner_of(source, span)
-                    if owner is None:
+                    owner_evidence = owner_of(source, span)
+                    if owner_evidence is None:
                         self._gap(source, "unknown_or_conflicting_owner")
                         continue
+                    owner, source_capture_id = owner_evidence
                     capture = self._active.get(owner)
                     if capture is None:
+                        continue
+                    if source == "kiro" and source_capture_id != capture.capture_id:
+                        self._gap(source, "capture_mismatch")
                         continue
                     if span.end_time_unix_nano < capture.started_at_ns:
                         capture.gaps.add("completed_before_capture")

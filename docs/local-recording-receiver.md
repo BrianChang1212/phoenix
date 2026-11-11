@@ -49,6 +49,8 @@ status 的 `receiver_gaps` 是接收端全域計數，例如 `codex:unknown_or_c
 
 歸屬證據限同一份有界 OTLP request。Codex 使用直接 `conversation.id`，Kiro 使用直接 `session.id`。沒有直接 ID 時只接受可沿 parent 鏈抵達且無衝突的祖先。整份 Trace 不作為對話證據。重複 span ID 的內容衝突、祖先衝突、循環、深度超限與未知歸屬都不保存。祖先晚於該 request 到達時，不回放已捨棄的 child。
 
+Kiro spans 必須帶 `recording.capture_id`，且必須等於該 Kiro session 目前 active capture。缺少 ID、屬於先前 capture，或祖先鏈出現不同 capture ID 的 span 不會保存。此檢查阻止本機舊佇列在同一 Kiro session 下重試時混入新 Phoenix Session。
+
 開始前已結束的 span 不保存。跨越開始時間的 span 保留原起訖時間，附 `recording.boundary=crosses_start`。停止立即關閉 admission，不提供尾端收尾。已錄過的原始 Trace 與 span ID 不會再加入下一個 capture。
 
 每個 capture 使用獨立 `session.id`，固定 Project 為 `task-recordings`。Trace ID 依 `uuid5(NAMESPACE_URL, "phoenix-recording/{capture_id}/{original_trace_id}")` 重映射；span ID 與 parent ID 保留。`recording.original_*`、`recording.conversation_id`、`recording.task`、`recording.started_at_ns` 保存來源與分段對照。其他來源屬性、原始時間及原生狀態保留。此切片不新增 Token 推估或加總規則。
