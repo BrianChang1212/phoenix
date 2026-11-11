@@ -75,6 +75,7 @@ import {
 import { SessionColumnSelector } from "./SessionColumnSelector";
 import type { SessionFilterValidConditionArgs } from "./SessionFilterConditionField";
 import { SessionFilterConditionFieldWithVocabulary } from "./SessionFilterConditionField";
+import { SessionSourceFilter } from "./SessionSourceFilter";
 import { SessionsTableAside } from "./SessionsTableAside";
 import { SessionsTableEmpty } from "./SessionsTableEmpty";
 import { spansTableCSS } from "./styles";
@@ -603,6 +604,7 @@ export function SessionsTable(props: SessionsTableProps) {
                 onValidCondition={handleValidSessionFilterCondition}
               />
             </div>
+            <SessionSourceFilter />
             <TableMetricsChartSelector view="sessions" />
             <SessionColumnSelector
               columns={table.getAllColumns()}

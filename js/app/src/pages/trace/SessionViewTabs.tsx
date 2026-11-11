@@ -11,9 +11,14 @@ import {
   Tabs,
 } from "@phoenix/components";
 
-export type SessionView = "turns" | "traces" | "annotations";
+export type SessionView = "timeline" | "turns" | "traces" | "annotations";
 
-const SESSION_VIEWS: SessionView[] = ["turns", "traces", "annotations"];
+const SESSION_VIEWS: SessionView[] = [
+  "timeline",
+  "turns",
+  "traces",
+  "annotations",
+];
 
 export function isSessionView(value: unknown): value is SessionView {
   return SESSION_VIEWS.includes(value as SessionView);
@@ -50,6 +55,7 @@ export function SessionViewTabs({
       }}
     >
       <TabList aria-label="Session view">
+        <Tab id="timeline">Timeline</Tab>
         <Tab id="turns">
           <span css={tabLabelCSS}>
             <Icon svg={<Icons.MessagesSquare />} />

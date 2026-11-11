@@ -58,6 +58,7 @@ import {
   sessionDetailsTracesViewQuery,
   SessionDetailsTracesViewSkeleton,
 } from "./SessionDetailsTracesView";
+import { SessionTimelineView } from "./SessionTimeline";
 import type { SessionView } from "./SessionViewTabs";
 import { isSessionView, SessionViewTabs } from "./SessionViewTabs";
 
@@ -339,7 +340,7 @@ export function SessionDetails(props: SessionDetailsProps) {
   const loadQueryForSessionView = useCallback(
     (view: SessionView) => {
       // The annotations view fetches its own data when it mounts.
-      if (view === "annotations") {
+      if (view === "annotations" || view === "timeline") {
         return;
       }
       if (loadedSessionIdsByViewRef.current[view] === sessionId) {
@@ -429,7 +430,9 @@ export function SessionDetails(props: SessionDetailsProps) {
               traceCount={traceCount}
             >
               <Suspense fallback={<SessionViewSkeleton view={sessionView} />}>
-                {sessionView === "annotations" ? (
+                {sessionView === "timeline" ? (
+                  <SessionTimelineView sessionId={sessionId} />
+                ) : sessionView === "annotations" ? (
                   <SessionAnnotationsTable sessionId={sessionId} />
                 ) : sessionView === "traces" ? (
                   tracesViewQueryRef != null && (
