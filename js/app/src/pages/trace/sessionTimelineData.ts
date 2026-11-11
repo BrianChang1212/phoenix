@@ -99,6 +99,11 @@ function normalizeOperation(
   span: SessionTimelineSpan
 ): SessionOperation | null {
   const a = span.attributes;
+  if (
+    a["kiro.record_kind"] === "event observation; no operation duration" ||
+    stringAttribute(a, "kiro.observation_semantics") !== null
+  )
+    return null;
   const isTool =
     span.span_kind === "TOOL" ||
     a["codex.tool.phase"] === "dispatch" ||
