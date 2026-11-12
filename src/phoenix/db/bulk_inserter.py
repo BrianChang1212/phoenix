@@ -1,9 +1,12 @@
 import asyncio
 import logging
+from collections.abc import Mapping
 from asyncio import Queue, as_completed, sleep
 from collections import deque
+from dataclasses import fields, is_dataclass
 from functools import singledispatchmethod
 from random import uniform
+from sys import getsizeof
 from time import perf_counter, time
 from typing import Any, AsyncIterator, Awaitable, Callable, Iterable, NamedTuple, Optional, cast
 
@@ -32,6 +35,7 @@ from phoenix.server.prometheus import (
     BULK_LOADER_EXCEPTIONS,
     BULK_LOADER_LAST_ACTIVITY,
     BULK_LOADER_SPAN_EXCEPTIONS,
+    RECORDING_SPANS_DROPPED,
     BULK_LOADER_SPAN_INSERTION_TIME,
     SPAN_INGESTION_FAILED_SPANS,
     SPAN_INGESTION_LAST_SUCCESS,
@@ -90,6 +94,28 @@ def _error_fields(error: Exception) -> tuple[str, Optional[str], str]:
     return type(error).__name__, sqlstate, _span_error_locations(error)
 
 
+def _managed_span_size_bytes(value: Any) -> int:
+    """Conservatively estimate the retained Python object graph for one queue item."""
+    seen: set[int] = set()
+
+    def size(item: Any) -> int:
+        item_id = id(item)
+        if item_id in seen:
+            return 0
+        seen.add(item_id)
+        retained = getsizeof(item)
+        if isinstance(item, Mapping):
+            retained += sum(size(key) + size(nested) for key, nested in item.items())
+        elif isinstance(item, (list, tuple, set, frozenset)):
+            retained += sum(size(nested) for nested in item)
+        elif is_dataclass(item) and not isinstance(item, type):
+            retained += sum(size(getattr(item, field.name)) for field in fields(item))
+        return retained
+
+    # Include queue, deadline-map and size-map entry overhead conservatively.
+    return size(value) + 256
+
+
 async def _save_span_costs(
     session: AsyncSession, costs: list[models.SpanCost]
 ) -> Optional[Exception]:
@@ -130,6 +156,9 @@ class BulkInserter:
         span_retry_max_delay_sec: float = 5.0,
         span_retry_allowance: int = 5,
         shutdown_drain_sec: float = 5.0,
+        managed_span_queue_limit: int = 10_000,
+        managed_span_max_age_sec: float = 120.0,
+        managed_span_max_bytes: int = 64 * 1024 * 1024,
     ) -> None:
         """
         :param db: A function to initiate a new database session.
@@ -149,6 +178,10 @@ class BulkInserter:
         hold the batch until the database is reachable.
         :param shutdown_drain_sec: How long shutdown keeps writing queued spans and
         operations before cancelling and dropping what remains.
+        :param managed_span_queue_limit: Maximum recording spans retained by this writer.
+        :param managed_span_max_age_sec: Maximum time a recording span can remain queued,
+        including in a batch held during database connection failures.
+        :param managed_span_max_bytes: Maximum estimated memory retained by recording spans.
         """
         self._db = db
         self._running = False
@@ -157,8 +190,36 @@ class BulkInserter:
         self._operations: Optional[Queue[DataManipulation]] = None
         self._max_queue_size = max_queue_size
         self._max_spans_queue_size = max_spans_queue_size
-        self._spans: deque[tuple[Span, ProjectName]] = deque(initial_batch_of_spans)
+        self._spans: deque[tuple[Span, ProjectName]] = deque()
         self._span_batch: list[tuple[Span, ProjectName]] = []
+        if (
+            managed_span_queue_limit < 1
+            or managed_span_max_age_sec <= 0
+            or managed_span_max_bytes < 1
+        ):
+            raise ValueError("Managed span queue limits must be positive")
+        self._managed_span_queue_limit = managed_span_queue_limit
+        self._managed_span_max_age_sec = managed_span_max_age_sec
+        self._managed_span_max_bytes = managed_span_max_bytes
+        self._managed_span_deadlines: dict[int, float] = {}
+        self._managed_span_sizes: dict[int, int] = {}
+        self._managed_span_retained_bytes = 0
+        for item in initial_batch_of_spans:
+            span, _ = item
+            if self._recording_capture_id(span):
+                if len(self._managed_span_sizes) >= self._managed_span_queue_limit:
+                    RECORDING_SPANS_DROPPED.labels(reason="capacity").inc()
+                    continue
+                retained_bytes = _managed_span_size_bytes(item)
+                if self._managed_span_retained_bytes + retained_bytes > self._managed_span_max_bytes:
+                    RECORDING_SPANS_DROPPED.labels(reason="byte_capacity").inc()
+                    continue
+                self._managed_span_deadlines[id(span)] = (
+                    perf_counter() + self._managed_span_max_age_sec
+                )
+                self._managed_span_sizes[id(span)] = retained_bytes
+                self._managed_span_retained_bytes += retained_bytes
+            self._spans.append(item)
         self._span_retry_attempts = 0
         self._span_limited_retries = 0
         self._span_retry_at = 0.0
@@ -227,7 +288,62 @@ class BulkInserter:
         cast("Queue[DataManipulation]", self._operations).put_nowait(operation)
 
     async def _enqueue_span(self, span: Span, project_name: str) -> None:
+        if self._recording_capture_id(span):
+            self._prune_expired_managed_spans()
+            if len(self._managed_span_sizes) >= self._managed_span_queue_limit:
+                RECORDING_SPANS_DROPPED.labels(reason="capacity").inc()
+                return
+            retained_bytes = _managed_span_size_bytes((span, project_name))
+            if self._managed_span_retained_bytes + retained_bytes > self._managed_span_max_bytes:
+                RECORDING_SPANS_DROPPED.labels(reason="byte_capacity").inc()
+                return
+            self._managed_span_deadlines[id(span)] = (
+                perf_counter() + self._managed_span_max_age_sec
+            )
+            self._managed_span_sizes[id(span)] = retained_bytes
+            self._managed_span_retained_bytes += retained_bytes
         self._spans.append((span, project_name))
+
+    @staticmethod
+    def _recording_capture_id(span: Span) -> Optional[str]:
+        recording = span.attributes.get("recording")
+        capture_id = (
+            recording.get("capture_id")
+            if isinstance(recording, dict)
+            else span.attributes.get("recording.capture_id")
+        )
+        return capture_id if isinstance(capture_id, str) and capture_id else None
+
+    def _forget_managed_spans(self, items: Iterable[tuple[Span, ProjectName]]) -> None:
+        for span, _ in items:
+            span_id = id(span)
+            self._managed_span_deadlines.pop(span_id, None)
+            self._managed_span_retained_bytes -= self._managed_span_sizes.pop(span_id, 0)
+
+    def _prune_expired_managed_spans(self, *, include_batch: bool = False) -> None:
+        now = perf_counter()
+        expired_ids = {
+            span_id
+            for span_id, deadline in self._managed_span_deadlines.items()
+            if deadline <= now
+        }
+        if not expired_ids:
+            return
+        queued_before = len(self._spans) + (len(self._span_batch) if include_batch else 0)
+        self._spans = deque(item for item in self._spans if id(item[0]) not in expired_ids)
+        if include_batch:
+            self._span_batch = [
+                item for item in self._span_batch if id(item[0]) not in expired_ids
+            ]
+        queued_after = len(self._spans) + (len(self._span_batch) if include_batch else 0)
+        removed = queued_before - queued_after
+        remaining_ids = {id(item[0]) for item in self._spans}
+        remaining_ids.update(id(item[0]) for item in self._span_batch)
+        for span_id in expired_ids - remaining_ids:
+            self._managed_span_deadlines.pop(span_id, None)
+            self._managed_span_retained_bytes -= self._managed_span_sizes.pop(span_id, 0)
+        if removed:
+            RECORDING_SPANS_DROPPED.labels(reason="expired").inc(removed)
 
     async def _bulk_insert(self) -> None:
         assert isinstance(self._operations, Queue)
@@ -281,6 +397,7 @@ class BulkInserter:
             await sleep(sleep_delay)
 
     async def _insert_spans(self, num_spans_to_insert: int) -> None:
+        self._prune_expired_managed_spans(include_batch=True)
         if perf_counter() < self._span_retry_at:
             return
         if not self._span_batch:
@@ -402,11 +519,13 @@ class BulkInserter:
                     phase,
                     _span_error_locations(error),
                 )
+                self._forget_managed_spans(self._span_batch)
                 self._span_batch.clear()
                 self._span_retry_attempts = 0
                 self._span_limited_retries = 0
                 self._span_retry_at = 0.0
             return
+        self._forget_managed_spans(self._span_batch)
         self._span_batch.clear()
         self._span_retry_attempts = 0
         self._span_limited_retries = 0

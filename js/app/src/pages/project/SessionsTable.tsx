@@ -246,6 +246,10 @@ export function SessionsTable(props: SessionsTableProps) {
               session: node {
                 id
                 sessionId
+                recordingMetadata {
+                  task
+                  source
+                }
                 userId
                 numTraces
                 startTime
@@ -365,9 +369,32 @@ export function SessionsTable(props: SessionsTableProps) {
       header: "session id",
       accessorKey: "sessionId",
       enableSorting: false,
-      cell: ({ getValue }) => (
-        <CopyableTextCell value={getValue() as string | null} />
-      ),
+      cell: ({ getValue, row }) => {
+        const sessionId = getValue() as string | null;
+        const metadata = row.original.recordingMetadata;
+        if (!metadata) {
+          return <CopyableTextCell value={sessionId} />;
+        }
+        return (
+          <Flex direction="column" gap="size-25" minWidth={0}>
+            <Flex
+              direction="row"
+              gap="size-50"
+              alignItems="center"
+              width="100%"
+              minWidth={0}
+            >
+              <Truncate maxWidth="100%" title={metadata.task}>
+                {metadata.task}
+              </Truncate>
+              <Text size="XS" color="text-700">
+                {metadata.source}
+              </Text>
+            </Flex>
+            <CopyableTextCell value={sessionId} />
+          </Flex>
+        );
+      },
     },
     {
       header: "first input",

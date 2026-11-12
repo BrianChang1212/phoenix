@@ -22,6 +22,7 @@ from .experiments import router as experiments_router
 from .model_providers import router as model_providers_router
 from .projects import router as projects_router
 from .prompts import router as prompts_router
+from .recordings import router as recordings_router
 from .secrets import router as secrets_router
 from .sessions import router as sessions_router
 from .spans import router as spans_router
@@ -73,6 +74,7 @@ def create_v1_router(authentication_enabled: bool) -> APIRouter:
     viewer_restricted_router.include_router(traces_router)
     viewer_restricted_router.include_router(spans_router)
     viewer_restricted_router.include_router(prompts_router)
+    viewer_restricted_router.include_router(recordings_router)
     viewer_restricted_router.include_router(projects_router)
     viewer_restricted_router.include_router(model_providers_router)
     viewer_restricted_router.include_router(custom_model_providers_router)

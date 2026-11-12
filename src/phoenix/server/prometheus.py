@@ -131,6 +131,13 @@ SPAN_INGESTION_UNRESOLVED_SPANS = Counter(
     documentation="Number of accepted spans released without a confirmed commit outcome",
 )
 
+RECORDING_SPANS_DROPPED = Counter(
+    namespace="phoenix",
+    name="recording_spans_dropped_total",
+    documentation="Managed recording spans discarded after expiry or capacity limits",
+    labelnames=["reason"],
+)
+
 SPAN_INGESTION_LAST_SUCCESS = Gauge(
     namespace="phoenix",
     name="span_ingestion_last_success_timestamp_seconds",

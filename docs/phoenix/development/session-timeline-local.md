@@ -10,7 +10,7 @@
 
 本機入口為 <http://127.0.0.1:6006>，啟停命令不變。現行產物為 `D:\Brian\tools\phoenix\recording-releases\20261112-r3-dense-timeline`，817個後端及26個前端檔案已逐檔核對。密集時間軸由同一命中表面提供有時間標示的候選區段，操作清單可捲動，保留真實平行關係、時間及全部操作。真Kiro大型資料2092 spans／1033操作在隔離與正式服務通過點選、鍵盤、503恢復及原始Trace返回驗證，桌面與窄視窗截圖保存在本機驗收目錄 `D:\Brian\.tmp\phoenix-on-demand-recording-20261112\dense-production-large-browser`。
 
-按需錄製的介面與資料限制見[接收器說明](../../../local-recording-receiver.md)。復原master收據為 `recording-releases\20261112-r1\rollout\receipt.json`；本次切換前啟動檔保存在r3的 `rollout\backend-switch`。先停止服務，再依限定安裝工具的收據復原匹配雜湊檔案，最後重啟；不覆蓋現行SQLite，舊release與原始備份保留。
+按需錄製的介面與資料限制見[接收器說明](../../local-recording-receiver.md)。復原master收據為 `recording-releases\20261112-r1\rollout\receipt.json`；本次切換前啟動檔保存在r3的 `rollout\backend-switch`。先停止服務，再依限定安裝工具的收據復原匹配雜湊檔案，最後重啟；不覆蓋現行SQLite，舊release與原始備份保留。
 
 ## 資料與來源
 

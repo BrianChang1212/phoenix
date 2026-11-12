@@ -1,5 +1,6 @@
 import asyncio
 import contextlib
+import hashlib
 import importlib
 import json
 import logging
@@ -10,6 +11,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from functools import cached_property, partial
 from pathlib import Path
+from time import time_ns
 from types import MethodType
 from typing import (
     TYPE_CHECKING,
@@ -68,6 +70,7 @@ from phoenix.config import (
     get_env_allowed_sandbox_providers,
     get_env_csrf_trusted_origins,
     get_env_database_allocated_storage_capacity_gibibytes,
+    get_env_database_connection_str,
     get_env_database_usage_insertion_blocking_threshold_percentage,
     get_env_disable_agent_assistant,
     get_env_enable_mcp_server,
@@ -84,6 +87,7 @@ from phoenix.config import (
     get_env_phoenix_agents_disable_bash,
     get_env_port,
     get_env_support_email,
+    get_working_dir,
     server_instrumentation_is_enabled,
     server_log_export_is_enabled,
     verify_server_environment_variables,
@@ -168,6 +172,8 @@ from phoenix.server.monty_runtime import MontyRuntime
 from phoenix.server.oauth2 import OAuth2Clients
 from phoenix.server.oauth2_authorization_server import public_origin
 from phoenix.server.prometheus import SPAN_QUEUE_REJECTIONS
+from phoenix.server.recording import RecordingGate
+from phoenix.server.recording_readback import settle_recording_spans
 from phoenix.server.redaction import Redactor, current_redactor
 from phoenix.server.retention import TraceDataSweeper
 from phoenix.server.sandbox._download import prefetch_wasm_binary_if_needed
@@ -736,6 +742,7 @@ def _lifespan(
                 enable_prometheus=enable_prometheus,
                 token_store=token_store,
                 interceptors=interceptors,
+                recording_gate=getattr(app.state, "recording_gate", None),
             )
             await stack.enter_async_context(grpc_server)
             await stack.enter_async_context(dml_event_handler)
@@ -770,6 +777,49 @@ def _lifespan(
                         "Failed to initialize docs MCP server; continuing without docs capability.",
                         exc_info=True,
                     )
+            recording_gate = getattr(app.state, "recording_gate", None)
+            if recording_gate is not None:
+                from phoenix.server.recording_lifetime import maintain_lifetimes
+
+                async def maintain_recordings() -> None:
+                    while True:
+                        now_ns = time_ns()
+                        recording_gate.tick(now_ns=now_ns)
+                        for receipt in recording_gate.draining_captures_due(now_ns=now_ns):
+                            if not recording_gate.begin_readback(receipt.capture_id):
+                                continue
+                            try:
+                                result = await settle_recording_spans(
+                                    db,
+                                    capture_id=receipt.capture_id,
+                                    expected_span_keys=set(
+                                        recording_gate.expected_span_keys(receipt.capture_id)
+                                    ),
+                                )
+                                recording_gate.complete_drain(receipt.capture_id, result)
+                            except Exception:
+                                recording_gate.fail_readback(receipt.capture_id)
+                                logger.warning(
+                                    "Recording storage readback failed for capture %s",
+                                    receipt.capture_id,
+                                    exc_info=True,
+                                )
+                        await asyncio.sleep(1)
+
+                recording_task = asyncio.create_task(maintain_recordings())
+                lifetime_task = asyncio.create_task(maintain_lifetimes(recording_gate))
+
+                async def stop_recording_maintenance() -> None:
+                    for task in (lifetime_task, recording_task):
+                        task.cancel()
+                    for task in (lifetime_task, recording_task):
+                        try:
+                            await task
+                        except asyncio.CancelledError:
+                            pass
+                    recording_gate.close()
+
+                stack.push_async_callback(stop_recording_maintenance)
             # Probe the shared runtime once when any consumer can use it.
             # Failure is non-fatal because Monty is an optional server feature.
             mounted_mcp_code_mode = getattr(app.state, "mcp_code_mode_sandbox", None) is not None
@@ -1015,6 +1065,7 @@ def create_app(
     allowed_origins: Optional[list[str]] = None,
     management_url: Optional[str] = None,
     welcome_message: Optional[_WelcomeMessage] = None,
+    recording_gate: Optional[RecordingGate] = None,
 ) -> FastAPI:
     if grpc_host is None:
         grpc_host = get_env_host()
@@ -1210,6 +1261,34 @@ def create_app(
             "defaultModelsExpandDepth": -1,  # hides the schema section in the Swagger UI
         },
     )
+    if recording_gate is not None or os.environ.get("PHOENIX_RECORDING_ENABLED") == "true":
+        if int(os.environ.get("WEB_CONCURRENCY", "1")) != 1:
+            raise ValueError("Recording requires exactly one Phoenix worker")
+        if recording_gate is not None:
+            app.state.recording_gate = recording_gate
+        else:
+            configured_state_dir = os.environ.get("PHOENIX_RECORDING_STATE_DIR")
+            if configured_state_dir:
+                state_dir = Path(configured_state_dir).expanduser()
+            elif get_env_database_connection_str().startswith("sqlite") or os.environ.get(
+                "PHOENIX_WORKING_DIR"
+            ):
+                state_dir = get_working_dir() / "recording"
+            else:
+                raise ValueError(
+                    "PHOENIX_RECORDING_STATE_DIR is required for non-local database recording"
+                )
+            if not state_dir.is_absolute():
+                raise ValueError("PHOENIX_RECORDING_STATE_DIR must be an absolute path")
+            state_dir = state_dir.resolve()
+            binding = hashlib.sha256(get_env_database_connection_str().encode()).hexdigest()
+            app.state.recording_gate = RecordingGate(
+                ledger_path=state_dir / "receipts.sqlite3",
+                database_binding=binding,
+                timeline_origin=os.environ.get(
+                    "PHOENIX_RECORDING_ORIGIN", f"http://127.0.0.1:{get_env_port()}"
+                ),
+            )
     app.include_router(create_v1_router(authentication_enabled))
     app.include_router(create_client_errors_router(authentication_enabled))
     if not get_env_disable_agent_assistant():

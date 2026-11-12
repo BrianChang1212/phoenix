@@ -60,6 +60,11 @@ vi.mock(
   })
 );
 
+vi.mock("@phoenix/components/annotation/SessionAnnotationSummaryGroup", () => ({
+  SessionAnnotationSummaryGroupToken: () => null,
+  SessionAnnotationSummaryGroupTokens: () => null,
+}));
+
 vi.mock("@phoenix/contexts/StreamStateContext", () => ({
   useStreamState: () => ({ fetchKey: 0 }),
 }));
@@ -102,6 +107,32 @@ vi.mock("../SessionFilterConditionField", async () => {
 
 vi.mock("../SessionColumnSelector", () => ({
   SessionColumnSelector: () => null,
+}));
+
+vi.mock("../IOValueTooltipCell", async () => {
+  const React = await import("react");
+  return {
+    SessionInputValueTooltipCell: ({ preview }: { preview: string }) =>
+      React.createElement("span", null, preview),
+    SessionOutputValueTooltipCell: ({ preview }: { preview: string }) =>
+      React.createElement("span", null, preview),
+  };
+});
+
+vi.mock("@phoenix/components/table/TimestampCell", () => ({
+  TimestampCell: () => null,
+}));
+
+vi.mock("@phoenix/components/trace/LatencyText", () => ({
+  LatencyText: () => null,
+}));
+
+vi.mock("@phoenix/components/trace/SessionTokenCosts", () => ({
+  SessionTokenCosts: () => null,
+}));
+
+vi.mock("@phoenix/components/trace/SessionTokenCount", () => ({
+  SessionTokenCount: () => null,
 }));
 
 vi.mock("../SessionsTableAside", () => ({
@@ -211,6 +242,71 @@ describe("SessionsTable preload integration", () => {
     expect(probedSearch).toBe(
       `?sessionFilterCondition=${encodeURIComponent(seed)}`
     );
+  });
+
+  it("shows recording task and source while keeping the copyable session id", async () => {
+    const recordedSession = {
+      id: "session-node-id",
+      sessionId: "capture-123",
+      recordingMetadata: { task: "Review trace timings", source: "codex" },
+      userId: null,
+      numTraces: 1,
+      startTime: "2026-11-12T00:00:00.000Z",
+      endTime: "2026-11-12T00:00:01.000Z",
+      firstInput: { value: "first input" },
+      lastOutput: { value: "last output" },
+      tokenUsage: { total: 12 },
+      traceLatencyMsP50: 100,
+      traceLatencyMsP99: 200,
+      costSummary: { total: { cost: 0 } },
+      sessionAnnotations: [],
+      summarySessionAnnotationSummaries: [],
+    };
+    relayMocks.usePaginationFragment.mockReturnValue({
+      data: {
+        id: "project-integration",
+        name: "integration project",
+        sessions: {
+          edges: [
+            { session: recordedSession },
+            {
+              session: {
+                ...recordedSession,
+                id: "ordinary-session-node-id",
+                sessionId: "ordinary-session-id",
+                recordingMetadata: null,
+                firstInput: { value: "ordinary first input" },
+              },
+            },
+          ],
+        },
+      },
+      hasNext: false,
+      isLoadingNext: false,
+      loadNext: vi.fn(),
+      refetch: relayMocks.refetch,
+    });
+
+    await renderTable();
+
+    const rows = Array.from(container.querySelectorAll("tbody tr"));
+    expect(
+      rows.some(
+        (row) =>
+          row.textContent?.includes("Review trace timings") &&
+          row.textContent.includes("codex") &&
+          row.textContent.includes("capture-123") &&
+          row.textContent.includes("first input")
+      )
+    ).toBe(true);
+    expect(
+      rows.some(
+        (row) =>
+          row.textContent?.includes("ordinary-session-id") &&
+          !row.textContent.includes("Review trace timings") &&
+          row.textContent.includes("ordinary first input")
+      )
+    ).toBe(true);
   });
 
   it("refetches when the user applies a different condition", async () => {

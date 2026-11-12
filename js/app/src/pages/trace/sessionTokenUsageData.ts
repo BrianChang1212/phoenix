@@ -20,6 +20,7 @@ export type TokenUsage =
       scope: "model" | "turn" | "session";
       provenance: ("model" | "turn")[];
       sourceSpanIds: string[];
+      coverage: "observed" | "crosses_recording_boundary";
     };
 
 const countSchema = z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER);
@@ -92,6 +93,10 @@ function readCounts(
     scope,
     provenance: [scope],
     sourceSpanIds: [],
+    coverage:
+      attributes["recording.boundary"] === "crosses_start"
+        ? "crosses_recording_boundary"
+        : "observed",
   };
 }
 
@@ -136,8 +141,10 @@ function sumUsages(
   const counts: TokenCounts = { input: 0, output: 0, total: 0, cacheRead: 0 };
   const sourceSpanIds: string[] = [];
   const provenance = new Set<"model" | "turn">();
+  let crossesBoundary = false;
   for (const usage of usages) {
     if (usage.kind === "unavailable") return usage;
+    crossesBoundary ||= usage.coverage === "crosses_recording_boundary";
     if (usage.counts.total == null)
       return { kind: "unavailable", reason: "用量僅有部分欄位，不提供總數" };
     for (const field of [
@@ -162,6 +169,7 @@ function sumUsages(
         scope,
         provenance: [...provenance],
         sourceSpanIds,
+        coverage: crossesBoundary ? "crosses_recording_boundary" : "observed",
       }
     : { kind: "unavailable", reason: "來源未提供用量" };
 }

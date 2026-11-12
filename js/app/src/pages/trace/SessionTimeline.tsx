@@ -1,5 +1,5 @@
 import { css } from "@emotion/react";
-import { useState, type ReactNode } from "react";
+import { useId, useState, type ReactNode } from "react";
 import { Link } from "react-router";
 
 import type {
@@ -14,6 +14,7 @@ import {
 } from "./sessionTimelineDuration";
 import { OperationTokenUsage, SessionTokenSummary } from "./SessionTokenUsage";
 import { useSessionTimelineRefresh } from "./useSessionTimelineRefresh";
+import { timelineHitCandidates } from "./sessionTimelineHitTargets";
 
 const timelineCSS = css`
   padding: 24px;
@@ -70,10 +71,30 @@ const timelineCSS = css`
     padding: 0;
     min-width: 0;
     overflow: hidden;
-    border: 2px solid #101010;
+    box-sizing: border-box;
+    border: 0;
+    pointer-events: none;
     border-radius: 8px;
     color: #101010;
     background: var(--timeline-tool);
+  }
+  .timeline-hit-surface {
+    position: absolute;
+    inset: 0;
+    width: 100%;
+    height: 48px;
+    padding: 0;
+    border: 0;
+    background: transparent;
+  }
+  .timeline-segment-options {
+    display: flex;
+    gap: 8px;
+    overflow-x: auto;
+    padding: 8px 0;
+  }
+  .timeline-segment-options button {
+    flex-shrink: 0;
   }
   .timeline-bar.model {
     background: var(--timeline-model);
@@ -183,6 +204,8 @@ const timelineCSS = css`
     outline-offset: 1px;
   }
   .timeline-names {
+    max-height: 280px;
+    overflow-y: auto;
     display: grid;
     grid-template-columns: repeat(auto-fit, minmax(190px, 1fr));
     gap: 10px;
@@ -314,10 +337,10 @@ function resolveTimelineSelection({
   );
   const selected =
     selection?.kind === "operation"
-      ? (rows.find((operation) => operation.id === selection.id) ?? rows[0])
+      ? rows.find((operation) => operation.id === selection.id) ?? rows[0]
       : selectedSegment
-        ? segmentRows?.[0]
-        : rows[0];
+      ? segmentRows?.[0]
+      : rows[0];
   return {
     selectedSegment,
     segmentRows,
@@ -345,6 +368,8 @@ export function SessionTimeline({
   const [search, setSearch] = useState("");
   const [source, setSource] = useState("all");
   const [selectedTurnId, setSelectedTurnId] = useState<string | null>(null);
+  const [candidateTimes, setCandidateTimes] = useState<number[]>([]);
+  const axisHelpId = useId();
   const observedAt = useObservationTime(snapshotObservedAt);
   const rawTurnIds = data.spans.flatMap((span) => {
     if (span.name !== "run_turn" && span.name !== "session_task.turn")
@@ -390,6 +415,30 @@ export function SessionTimeline({
       focusedParallelId,
     });
   const durationParts = Object.entries(timeline.totals);
+  const candidates = timeline.segments.filter((segment) =>
+    candidateTimes.includes(segment.startTime)
+  );
+  function selectSegment(segment: TimelineSegment) {
+    setSelection({ kind: "segment", startTime: segment.startTime });
+    setFocusedParallelId(
+      segment.operations.find((operation) => visibleIds.has(operation.id))
+        ?.id ?? null
+    );
+  }
+  function segmentLabel(segment: TimelineSegment) {
+    const operation = segment.operations.find((item) =>
+      visibleIds.has(item.id)
+    );
+    return `${
+      segment.operations.length > 1
+        ? "平行操作"
+        : segment.kind === "gap"
+        ? "未觀測區間"
+        : operation?.summary ?? operation?.name ?? "已篩除操作"
+    } · +${relativeSeconds(segment.startTime)}–${relativeSeconds(
+      segment.endTime
+    )} 秒`;
+  }
   let offset = 0;
 
   return (
@@ -547,15 +596,36 @@ export function SessionTimeline({
                     operation.status === "error" ||
                     operation.status === "timeout"
                 );
-                const label = `${isParallel ? "平行操作" : segment.kind === "gap" ? "未觀測區間" : (filtered[0]?.summary ?? filtered[0]?.name ?? "已篩除操作")} · +${relativeSeconds(segment.startTime)}–${relativeSeconds(segment.endTime)} 秒`;
+                const label = `${
+                  isParallel
+                    ? "平行操作"
+                    : segment.kind === "gap"
+                    ? "未觀測區間"
+                    : filtered[0]?.summary ?? filtered[0]?.name ?? "已篩除操作"
+                } · +${relativeSeconds(segment.startTime)}–${relativeSeconds(
+                  segment.endTime
+                )} 秒`;
                 return (
-                  <button
+                  <span
                     key={segment.startTime}
-                    type="button"
-                    className={`timeline-bar ${segment.kind} ${isParallel ? "parallel" : ""} ${isError ? "error" : ""}`}
+                    className={`timeline-bar ${segment.kind} ${
+                      isParallel ? "parallel" : ""
+                    } ${isError ? "error" : ""}`}
                     style={{
-                      left: `${timeline.duration > 0 ? ((segment.startTime - timeline.startTime) / timeline.duration) * 100 : 0}%`,
-                      width: `${timeline.duration > 0 ? ((segment.endTime - segment.startTime) / timeline.duration) * 100 : 0}%`,
+                      left: `${
+                        timeline.duration > 0
+                          ? ((segment.startTime - timeline.startTime) /
+                              timeline.duration) *
+                            100
+                          : 0
+                      }%`,
+                      width: `${
+                        timeline.duration > 0
+                          ? ((segment.endTime - segment.startTime) /
+                              timeline.duration) *
+                            100
+                          : 0
+                      }%`,
                       opacity:
                         segment.operations.length > 0 && !filtered.length
                           ? 0.25
@@ -563,29 +633,89 @@ export function SessionTimeline({
                     }}
                     title={label}
                     aria-label={label}
-                    aria-pressed={
-                      selection?.kind === "segment"
-                        ? selectedSegment === segment
-                        : displayedOperation !== undefined &&
-                          segment.operations.some(
-                            (operation) =>
-                              operation.id === displayedOperation.id
-                          )
-                    }
-                    onClick={() => {
-                      setSelection({
-                        kind: "segment",
-                        startTime: segment.startTime,
-                      });
-                      setFocusedParallelId(filtered[0]?.id ?? null);
-                    }}
+                    aria-hidden="true"
                   >
                     <OperationIcon kind={isParallel ? "mixed" : segment.kind} />
-                  </button>
+                  </span>
                 );
               })}
+              <button
+                type="button"
+                className="timeline-hit-surface"
+                aria-label="選擇時間軸區段"
+                aria-describedby={axisHelpId}
+                onClick={(event) => {
+                  if (event.detail === 0) {
+                    const segment = selectedSegment ?? timeline.segments[0];
+                    if (segment) {
+                      setCandidateTimes([segment.startTime]);
+                      selectSegment(segment);
+                    }
+                    return;
+                  }
+                  const bounds = event.currentTarget.getBoundingClientRect();
+                  const nearby = timelineHitCandidates({
+                    segments: timeline.segments,
+                    startTime: timeline.startTime,
+                    duration: timeline.duration,
+                    width: bounds.width,
+                    pointerX: event.clientX - bounds.left,
+                  });
+                  setCandidateTimes(nearby.map((segment) => segment.startTime));
+                  if (nearby.length === 1) selectSegment(nearby[0]);
+                }}
+                onKeyDown={(event) => {
+                  if (
+                    ![
+                      "ArrowLeft",
+                      "ArrowRight",
+                      "Home",
+                      "End",
+                      "Enter",
+                    ].includes(event.key)
+                  )
+                    return;
+                  event.preventDefault();
+                  const current = timeline.segments.findIndex(
+                    (segment) => segment === selectedSegment
+                  );
+                  const index =
+                    event.key === "Home"
+                      ? 0
+                      : event.key === "End"
+                      ? timeline.segments.length - 1
+                      : event.key === "ArrowLeft"
+                      ? Math.max(0, current - 1)
+                      : event.key === "ArrowRight"
+                      ? Math.min(timeline.segments.length - 1, current + 1)
+                      : Math.max(0, current);
+                  const segment = timeline.segments[index];
+                  if (segment) {
+                    setCandidateTimes([segment.startTime]);
+                    selectSegment(segment);
+                  }
+                }}
+              />
             </div>
           </div>
+          <p id={axisHelpId} className="timeline-muted" aria-live="polite">
+            點選時間軸選擇附近區段；左右方向鍵逐段選擇。
+            {selectedSegment ? ` ${segmentLabel(selectedSegment)}` : ""}
+          </p>
+          {candidates.length > 0 && (
+            <nav className="timeline-segment-options" aria-label="密集區段選擇">
+              {candidates.map((segment) => (
+                <button
+                  key={segment.startTime}
+                  type="button"
+                  aria-pressed={selectedSegment === segment}
+                  onClick={() => selectSegment(segment)}
+                >
+                  {segmentLabel(segment)}
+                </button>
+              ))}
+            </nav>
+          )}
           <div className="timeline-names">
             {rows.map((operation, index) => (
               <button
@@ -683,7 +813,13 @@ export function SessionTimeline({
                   : new Date(displayedOperation.endTime).toISOString()}
               </p>
               <Link
-                to={`/projects/${encodeURIComponent(data.projectId)}/traces/${encodeURIComponent(displayedOperation.traceId)}?selectedSpanNodeId=${encodeURIComponent(displayedOperation.id)}`}
+                to={`/projects/${encodeURIComponent(
+                  data.projectId
+                )}/traces/${encodeURIComponent(
+                  displayedOperation.traceId
+                )}?selectedSpanNodeId=${encodeURIComponent(
+                  displayedOperation.id
+                )}`}
               >
                 開啟原始 Trace
               </Link>

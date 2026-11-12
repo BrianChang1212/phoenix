@@ -78,6 +78,7 @@ from .sandbox_provider import SandboxProviderDataLoader
 from .secrets import SecretsDataLoader
 from .session_annotations_by_session import SessionAnnotationsBySessionDataLoader
 from .session_io import SessionIODataLoader
+from .session_recording_metadata import SessionRecordingMetadataDataLoader
 from .session_num_traces import SessionNumTracesDataLoader
 from .session_num_traces_with_error import SessionNumTracesWithErrorDataLoader
 from .session_token_usages import SessionTokenUsagesDataLoader
@@ -250,6 +251,7 @@ class DataLoaders:
     session_annotations_by_session: SessionAnnotationsBySessionDataLoader
     session_first_inputs: SessionIODataLoader
     session_last_outputs: SessionIODataLoader
+    session_recording_metadata: SessionRecordingMetadataDataLoader
     session_num_traces: SessionNumTracesDataLoader
     session_num_traces_with_error: SessionNumTracesWithErrorDataLoader
     session_token_usages: SessionTokenUsagesDataLoader
@@ -436,6 +438,7 @@ def build_data_loaders(
         session_annotations_by_session=SessionAnnotationsBySessionDataLoader(db),
         session_first_inputs=SessionIODataLoader(db, "first_input"),
         session_last_outputs=SessionIODataLoader(db, "last_output"),
+        session_recording_metadata=SessionRecordingMetadataDataLoader(db),
         session_num_traces=SessionNumTracesDataLoader(db),
         session_num_traces_with_error=SessionNumTracesWithErrorDataLoader(db),
         session_token_usages=SessionTokenUsagesDataLoader(db),

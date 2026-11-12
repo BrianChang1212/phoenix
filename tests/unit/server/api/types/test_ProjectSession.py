@@ -40,6 +40,37 @@ class TestProjectSession:
             httpx_client,
         )
 
+    async def test_recording_metadata(
+        self,
+        db: DbSessionFactory,
+        httpx_client: httpx2.AsyncClient,
+    ) -> None:
+        async with db() as session:
+            project = await _add_project(session)
+            project_session = await _add_project_session(
+                session,
+                project,
+                session_id="capture-graphql",
+                start_time=datetime.now(timezone.utc),
+            )
+            trace = await _add_trace(session, project, project_session)
+            await _add_span(
+                session,
+                trace,
+                attributes={
+                    "recording": {
+                        "capture_id": "capture-graphql",
+                        "task": "Inspect sessions table",
+                        "source": "codex",
+                    }
+                },
+            )
+            await session.flush()
+
+        assert await self._node(
+            "recordingMetadata{ task source }", project_session, httpx_client
+        ) == {"task": "Inspect sessions table", "source": "codex"}
+
     @pytest.fixture
     async def _data(
         self,

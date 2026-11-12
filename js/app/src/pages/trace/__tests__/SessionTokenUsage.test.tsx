@@ -68,6 +68,38 @@ describe("Session Token usage", () => {
     container.remove();
   });
 
+  it("labels a cross-boundary turn total without adding its model calls again", () => {
+    const snapshot = {
+      ...model("turn-total", {
+        "turn.id": "turn-1",
+        "recording.capture_id": "capture",
+        "recording.boundary": "crosses_start",
+        "codex.turn.token_usage.input_tokens": 100,
+        "codex.turn.token_usage.output_tokens": 20,
+      }),
+      name: "session_task.turn",
+      span_kind: "UNKNOWN",
+    };
+    const session = data([
+      snapshot,
+      model("model-call", {
+        "llm.token_count.prompt": 10,
+        "llm.token_count.completion": 5,
+      }),
+    ]);
+    session.operations = session.operations.map((operation) => ({
+      ...operation,
+      turnId: "turn-1",
+    }));
+    act(() => root.render(<SessionTokenSummary data={session} />));
+    expect(container.textContent).toContain("120");
+    expect(container.textContent).not.toContain("135");
+    expect(container.textContent).toContain("含跨錄製邊界用量，非錄製區間專屬");
+    expect(
+      container.querySelector('[role="note"]')?.closest("details")
+    ).toBeNull();
+  });
+
   it("shows input and output once when both semantic aliases exist", () => {
     act(() =>
       root.render(
