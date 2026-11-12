@@ -92,6 +92,8 @@ Phoenix runs practically anywhere, including your local machine, a containerized
 
 ## Run Locally
 
+> **Local Sessions timeline:** This checkout includes a single-row operation timeline, elapsed-time charts, scoped token usage, and live updates for Codex and Kiro. See the [local setup, validation, and recovery guide](docs/phoenix/development/session-timeline-local.md) for this workspace's Windows release and data limitations.
+
 Install Phoenix via `pip` or `conda` and have a fully functional Phoenix. For all installation and hosting options, see the [install guide](https://arize.com/docs/phoenix).
 
 ```shell

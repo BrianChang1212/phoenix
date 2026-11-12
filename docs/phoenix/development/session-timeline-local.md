@@ -2,6 +2,16 @@
 
 此功能延伸專案既有的追蹤 Sessions 列表，於 Session 詳情加入 Timeline 頁籤。它不是內建 assistant 的 AgentSession，也不建立第二套 Session 資料庫。
 
+## 精簡導覽
+
+2026-11-12 起，本機前端側欄只顯示 `Tracing` 與 `Settings`，不提供進階入口。其他原生模組與路由保留，這是導覽精簡，不是存取權限限制。專案首頁預設導向 Sessions，保留網址中的篩選條件；明確指定的 Spans／Traces 路徑仍可使用。
+
+選取 Session 或直接開啟未指定有效 `sessionView` 的 Session 網址，預設顯示 Timeline；明確選擇 Turns／Traces／Annotations 仍有效。日常流程為 `Tracing → 專案 → Sessions → Session → Timeline → 操作詳情`，可由詳情開啟原始 Trace。此調整不改變錄製方式，也不修補原生 Codex 缺少 `session.id` 的接入問題。
+
+本機入口為 <http://127.0.0.1:6006>，啟停命令不變。現行產物為 `D:\Brian\tools\phoenix\recording-releases\20261112-r3-dense-timeline`，817個後端及26個前端檔案已逐檔核對。密集時間軸由同一命中表面提供有時間標示的候選區段，操作清單可捲動，保留真實平行關係、時間及全部操作。真Kiro大型資料2092 spans／1033操作在隔離與正式服務通過點選、鍵盤、503恢復及原始Trace返回驗證，桌面與窄視窗截圖保存在本機驗收目錄 `D:\Brian\.tmp\phoenix-on-demand-recording-20261112\dense-production-large-browser`。
+
+按需錄製的介面與資料限制見[接收器說明](../../../local-recording-receiver.md)。復原master收據為 `recording-releases\20261112-r1\rollout\receipt.json`；本次切換前啟動檔保存在r3的 `rollout\backend-switch`。先停止服務，再依限定安裝工具的收據復原匹配雜湊檔案，最後重啟；不覆蓋現行SQLite，舊release與原始備份保留。
+
 ## 資料與來源
 
 Session 的 REST 回應提供 project 與 Trace 關聯，時間軸依序讀完每個 Trace 的 span 分頁，驗證回應後才呈現。錯誤與無法解析的回應不當作完整成功資料。
