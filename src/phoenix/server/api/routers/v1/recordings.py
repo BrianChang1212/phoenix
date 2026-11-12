@@ -7,6 +7,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from starlette.requests import Request
 
 from phoenix.server.recording import ConversationKey, RecordingGate
+from phoenix.server.recording_lifetime import LifetimeBinding, validate_local_binding
 
 router = APIRouter(tags=["recordings"], include_in_schema=False)
 
@@ -20,6 +21,7 @@ class RecordingOwner(BaseModel):
 class StartRecording(RecordingOwner):
     task: str = Field(min_length=1, max_length=200)
     request_id: str = Field(min_length=36, max_length=36)
+    lifetime: Optional[LifetimeBinding] = None
 
 
 class SelectRecording(RecordingOwner):
@@ -51,12 +53,20 @@ def _gate(request: Request) -> RecordingGate:
 async def start_recording(body: StartRecording, request: Request) -> dict[str, Any]:
     gate = _gate(request)
     try:
+        lifetime = (
+            validate_local_binding(body.source, body.conversation_id, body.lifetime)
+            if body.lifetime is not None
+            else None
+        )
         return asdict(
             gate.start(
-                ConversationKey(body.source, body.conversation_id), body.task, body.request_id
+                ConversationKey(body.source, body.conversation_id),
+                body.task,
+                body.request_id,
+                lifetime=lifetime,
             )
         )
-    except ValueError as error:
+    except (ValueError, OSError) as error:
         raise HTTPException(409, str(error)) from error
 
 

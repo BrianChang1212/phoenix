@@ -233,7 +233,7 @@ export type SessionDetailsProps = {
   sessionId: string;
 };
 
-const DEFAULT_SESSION_VIEW: SessionView = "turns";
+const DEFAULT_SESSION_VIEW: SessionView = "timeline";
 
 // The annotations side panel sizes in pixels
 const ANNOTATIONS_PANEL_DEFAULT_SIZE_PIXELS = 400;

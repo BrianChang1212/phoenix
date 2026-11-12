@@ -1,7 +1,9 @@
+import asyncio
 import unittest
 from datetime import datetime, timezone
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from unittest.mock import patch
 from uuid import uuid4
 
 from sqlalchemy import URL, select
@@ -10,11 +12,83 @@ from strawberry.relay import GlobalID
 
 from phoenix.db import models
 from phoenix.db.engines import aio_sqlite_engine
-from phoenix.server.recording_readback import read_recording_spans
+from phoenix.server.recording_readback import read_recording_spans, settle_recording_spans
 from phoenix.server.types import DbSessionFactory
 
 
 class RecordingReadbackTests(unittest.IsolatedAsyncioTestCase):
+    async def test_settling_reads_late_commit_within_one_bounded_budget(self):
+        first = ("01" * 16, "02" * 8)
+        second = ("03" * 16, "04" * 8)
+        await self.add_span(trace_id=first[0], span_id=first[1])
+
+        async def commit_later():
+            await asyncio.sleep(0.05)
+            await self.add_span(trace_id=second[0], span_id=second[1])
+
+        writer = asyncio.create_task(commit_later())
+        try:
+            result = await settle_recording_spans(
+                self.db,
+                capture_id=self.capture_id,
+                expected_span_keys={first, second},
+                timeout_sec=1,
+                retry_interval_sec=0.01,
+            )
+            self.assertEqual(result.storage, "verified")
+            self.assertEqual(result.persisted_span_keys, frozenset({first, second}))
+        finally:
+            await writer
+
+    async def test_settling_deadline_preserves_verified_partial_session(self):
+        first = ("01" * 16, "02" * 8)
+        second = ("03" * 16, "04" * 8)
+        await self.add_span(trace_id=first[0], span_id=first[1])
+        result = await asyncio.wait_for(
+            settle_recording_spans(
+                self.db,
+                capture_id=self.capture_id,
+                expected_span_keys={first, second},
+                timeout_sec=0.05,
+                retry_interval_sec=0.01,
+            ),
+            timeout=1,
+        )
+        self.assertEqual(result.storage, "partial")
+        self.assertEqual(result.persisted_span_keys, frozenset({first}))
+        self.assertIsNotNone(result.session_relay_id)
+
+    async def test_settling_timeout_on_first_read_is_not_a_verified_result(self):
+        async def blocked(*args, **kwargs):
+            await asyncio.Event().wait()
+
+        with patch("phoenix.server.recording_readback.read_recording_spans", blocked):
+            with self.assertRaises(TimeoutError):
+                await settle_recording_spans(
+                    self.db,
+                    capture_id=self.capture_id,
+                    expected_span_keys={("01" * 16, "02" * 8)},
+                    timeout_sec=0.02,
+                )
+
+    async def test_settling_cancellation_propagates(self):
+        entered = asyncio.Event()
+
+        async def blocked(*args, **kwargs):
+            entered.set()
+            await asyncio.Event().wait()
+
+        with patch("phoenix.server.recording_readback.read_recording_spans", blocked):
+            task = asyncio.create_task(
+                settle_recording_spans(
+                    self.db, capture_id=self.capture_id, expected_span_keys={("01" * 16, "02" * 8)}
+                )
+            )
+            await entered.wait()
+            task.cancel()
+            with self.assertRaises(asyncio.CancelledError):
+                await task
+
     async def asyncSetUp(self):
         self.temp_dir = TemporaryDirectory()
         db_path = Path(self.temp_dir.name) / "phoenix.sqlite3"

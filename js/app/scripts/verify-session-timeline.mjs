@@ -119,6 +119,27 @@ async function readSessionSpans(session) {
   return result;
 }
 
+function pairedKiroIntervals(spans) {
+  return spans
+    .filter(
+      (span) =>
+        (span.attributes["kiro.record_kind"] ??
+          span.attributes.kiro?.record_kind) === "paired tool boundaries"
+    )
+    .map((span) => [Date.parse(span.start_time), Date.parse(span.end_time)])
+    .filter(([start, end]) => Number.isFinite(start) && end > start)
+    .sort((left, right) => left[0] - right[0]);
+}
+
+function hasPairedOverlap(intervals) {
+  let previousEnd = -Infinity;
+  for (const [start, end] of intervals) {
+    if (start < previousEnd) return true;
+    previousEnd = Math.max(previousEnd, end);
+  }
+  return false;
+}
+
 function rawCounts(span) {
   const attributes = span.attributes;
   const turn = span.name === "session_task.turn";
@@ -259,7 +280,9 @@ try {
     });
     await page.goto(
       url(
-        `/projects/${encodeURIComponent(session.project_id)}/sessions?${timeRange}`
+        `/projects/${encodeURIComponent(
+          session.project_id
+        )}/sessions?${timeRange}`
       )
     );
     await page
@@ -396,12 +419,49 @@ try {
       await turnSelect.selectOption("");
       turnZoomVerified = true;
     }
-    const parallelButton = timeline
-      .getByRole("button", { name: /^平行操作 ·/ })
-      .first();
+    const axis = timeline.getByRole("button", {
+      name: "選擇時間軸區段",
+      exact: true,
+    });
+    const parallelVisual = timeline.locator(".timeline-bar.parallel").first();
+    const pairedIntervals = pairedKiroIntervals(spans);
+    assert(
+      operationCount >= pairedIntervals.length,
+      "Every paired Kiro operation must remain available in the operation list"
+    );
+    if (hasPairedOverlap(pairedIntervals))
+      assert(
+        (await parallelVisual.count()) > 0,
+        "Overlapping source operations must remain visible as parallel segments"
+      );
     let parallelVerified = false;
-    if (await parallelButton.count()) {
-      await parallelButton.click();
+    let denseAxisPointerVerified = false;
+    if (await parallelVisual.count()) {
+      await axis.scrollIntoViewIfNeeded();
+      const axisBounds = await axis.boundingBox();
+      const segmentBounds = await parallelVisual.boundingBox();
+      const segmentLabel = await parallelVisual.getAttribute("title");
+      assert(axisBounds && segmentBounds && segmentLabel);
+      await axis.click({
+        position: {
+          x: Math.max(
+            1,
+            Math.min(
+              axisBounds.width - 1,
+              segmentBounds.x + segmentBounds.width / 2 - axisBounds.x
+            )
+          ),
+          y: axisBounds.height / 2,
+        },
+      });
+      const segmentChoices = timeline.getByRole("navigation", {
+        name: "密集區段選擇",
+        exact: true,
+      });
+      await segmentChoices
+        .getByRole("button", { name: segmentLabel, exact: true })
+        .click();
+      denseAxisPointerVerified = true;
       const choices = timeline.getByRole("navigation", {
         name: "平行操作選擇",
         exact: true,
@@ -413,6 +473,46 @@ try {
       );
       parallelVerified = true;
     }
+    let operationListScrollVerified = false;
+    if (operationCount > 100) {
+      const listGeometry = await timeline
+        .locator(".timeline-names")
+        .evaluate((element) => ({
+          height: element.clientHeight,
+          scrollHeight: element.scrollHeight,
+        }));
+      assert(
+        listGeometry.height > 0 &&
+          listGeometry.height <= 320 &&
+          listGeometry.scrollHeight > listGeometry.height,
+        "The complete large operation list must scroll within a bounded viewport"
+      );
+      const detailDistance = await timeline.evaluate((element) => {
+        const track = element.querySelector(".timeline-axis");
+        const panel = element.querySelector('[aria-label="操作詳細資訊"]');
+        return (
+          panel.getBoundingClientRect().top -
+          track.getBoundingClientRect().bottom
+        );
+      });
+      assert(
+        detailDistance < 1000,
+        "Operation details must remain near the axis rather than below every card"
+      );
+      operationListScrollVerified = true;
+    }
+    await axis.focus();
+    await page.keyboard.press("Home");
+    await page.keyboard.press("ArrowRight");
+    await page.keyboard.press("Enter");
+    assert.equal(
+      await timeline
+        .getByRole("navigation", { name: "密集區段選擇", exact: true })
+        .getByRole("button", { pressed: true })
+        .count(),
+      1
+    );
+    await names.first().click();
     const sessionUsage = await verifyVisibleUsage(
       timeline.getByRole("region", { name: "Session Token", exact: true }),
       spans
@@ -422,7 +522,16 @@ try {
       numeric_parity_verified: false,
     };
     let screenshotOperation = 0;
-    for (let index = 0; index < operationCount; index += 1) {
+    const rawModelUsageCandidates = spans.filter(
+      (span) =>
+        (span.name === "handle_responses" || span.span_kind === "LLM") &&
+        rawCounts(span)
+    ).length;
+    for (
+      let index = 0;
+      rawModelUsageCandidates > 0 && index < operationCount;
+      index += 1
+    ) {
       await names.nth(index).focus();
       await page.keyboard.press("Enter");
       const modelHref = await detail
@@ -445,11 +554,6 @@ try {
         break;
       }
     }
-    const rawModelUsageCandidates = spans.filter(
-      (span) =>
-        (span.name === "handle_responses" || span.span_kind === "LLM") &&
-        rawCounts(span)
-    ).length;
     if (rawModelUsageCandidates)
       assert(
         modelUsage.numeric_parity_verified,
@@ -494,6 +598,9 @@ try {
       raw_model_usage_candidates: rawModelUsageCandidates,
       turn_zoom_verified: turnZoomVerified,
       parallel_verified: parallelVerified,
+      dense_axis_pointer_verified: denseAxisPointerVerified,
+      axis_keyboard_verified: true,
+      operation_list_scroll_verified: operationListScrollVerified,
     };
     report.sessions.push(sessionReport);
     report.current_stage = "original-trace-navigation";

@@ -2,6 +2,7 @@ import asyncio
 import tempfile
 import time
 import unittest
+from contextlib import asynccontextmanager
 from dataclasses import asdict
 from pathlib import Path
 from queue import SimpleQueue
@@ -67,7 +68,9 @@ def kiro_batch(
 ):
     request = ExportTraceServiceRequest()
     resource = request.resource_spans.add()
-    resource.resource.attributes.add(key="openinference.project.name").value.string_value = "kiro-local"
+    resource.resource.attributes.add(
+        key="openinference.project.name"
+    ).value.string_value = "kiro-local"
     scope = resource.scope_spans.add()
     span = scope.spans.add(
         trace_id=b"k" * 16,
@@ -81,7 +84,9 @@ def kiro_batch(
     if event_id:
         span.attributes.add(key="kiro.event_id").value.string_value = event_id
     if source_event_ids:
-        span.attributes.add(key="kiro.source_event_ids").value.string_value = ",".join(source_event_ids)
+        span.attributes.add(key="kiro.source_event_ids").value.string_value = ",".join(
+            source_event_ids
+        )
     if result:
         span.attributes.add(key="kiro.result").value.string_value = result
     if record_kind:
@@ -90,6 +95,36 @@ def kiro_batch(
 
 
 class RecordingGateTests(unittest.TestCase):
+    def test_both_sources_restart_retry_and_reject_work_outside_capture(self):
+        for owner in (OWNER, KIRO_OWNER):
+            with self.subTest(source=owner.source), tempfile.TemporaryDirectory() as directory:
+                ledger = Path(directory) / "recordings.sqlite3"
+                request_id = str(uuid4())
+                gate = RecordingGate(ledger_path=ledger)
+                capture = gate.start(owner, "restart matrix", request_id)
+                self.assertEqual(gate.start(owner, "restart matrix", request_id), capture)
+                request = (
+                    batch((101, owner, 0))
+                    if owner.source == "codex"
+                    else kiro_batch(
+                        owner.conversation_id, capture.capture_id, 101, event_id=str(uuid4())
+                    )
+                )
+                self.assertEqual(len(spans(gate.admit(request))), 1)
+                gate.close()
+                recovered = RecordingGate(ledger_path=ledger)
+                try:
+                    receipt = recovered.status(owner, capture.capture_id)
+                    self.assertEqual(receipt.state, "incomplete")
+                    self.assertIn("receiver_restart", receipt.gaps)
+                    self.assertEqual(recovered.start(owner, "restart matrix", request_id), receipt)
+                    self.assertEqual(spans(recovered.admit(request)), [])
+                    next_capture = recovered.start(owner, "next task", str(uuid4()))
+                    self.assertNotEqual(next_capture.capture_id, capture.capture_id)
+                    self.assertEqual(next_capture.queued_spans, 0)
+                finally:
+                    recovered.close()
+
     def setUp(self):
         self.gate = RecordingGate()
 
@@ -158,9 +193,7 @@ class RecordingGateTests(unittest.TestCase):
 
     def test_idle_lease_expires_into_a_bounded_drain(self):
         now = [1_000_000_000]
-        gate = RecordingGate(
-            clock_ns=lambda: now[0], idle_lease_sec=5, drain_grace_sec=2
-        )
+        gate = RecordingGate(clock_ns=lambda: now[0], idle_lease_sec=5, drain_grace_sec=2)
         capture = gate.start(OWNER, "lease", str(uuid4()))
         gate.admit(batch((1, OWNER, 0)))
         now[0] = capture.idle_lease_deadline_ns
@@ -242,9 +275,7 @@ class RecordingGateTests(unittest.TestCase):
         self.assertEqual(failed.state, "incomplete")
         self.assertIsNone(failed.timeline_url)
         self.assertIn("storage_readback_failed", failed.gaps)
-        self.assertEqual(
-            gate.draining_captures_due(now_ns=stopping.drain_deadline_ns), ()
-        )
+        self.assertEqual(gate.draining_captures_due(now_ns=stopping.drain_deadline_ns), ())
 
     def test_timeline_origin_must_be_loopback(self):
         with self.assertRaises(ValueError):
@@ -402,6 +433,54 @@ class RecordingGateTests(unittest.TestCase):
         self.assertEqual(spans(gate.admit(batch((1, OWNER, 0), (2, OWNER, 0)))), [])
         self.assertEqual(gate.receiver_gaps["codex:batch_limit"], 2)
 
+    def test_ingress_enforces_deadlines_while_watchdog_is_busy(self):
+        now = [time.time_ns()]
+        gate = RecordingGate(clock_ns=lambda: now[0], idle_lease_sec=1, drain_grace_sec=1)
+        capture = gate.start(KIRO_OWNER, "drain deadline", str(uuid4()))
+        stopped = gate.stop(KIRO_OWNER, capture.capture_id, ["late"])
+        now[0] = stopped.drain_deadline_ns + 1
+        self.assertEqual(
+            spans(
+                gate.admit(
+                    kiro_batch(KIRO_OWNER.conversation_id, capture.capture_id, 1, event_id="late")
+                )
+            ),
+            [],
+        )
+
+        capture = gate.start(OWNER, "idle deadline", str(uuid4()))
+        now[0] = capture.idle_lease_deadline_ns + 1
+        self.assertEqual(spans(gate.admit(batch((2, OWNER, 0)))), [])
+        self.assertIn("idle_lease_expired", gate.status(OWNER, capture.capture_id).gaps)
+
+    def test_kiro_delayed_manifest_does_not_bypass_capture_capacity(self):
+        gate = RecordingGate(max_capture_spans=1)
+        capture = gate.start(KIRO_OWNER, "bounded delayed events", str(uuid4()))
+        gate.stop(KIRO_OWNER, capture.capture_id, ["first", "second"])
+        self.assertEqual(
+            len(
+                spans(
+                    gate.admit(
+                        kiro_batch(
+                            KIRO_OWNER.conversation_id, capture.capture_id, 1, event_id="first"
+                        )
+                    )
+                )
+            ),
+            1,
+        )
+        self.assertEqual(
+            spans(
+                gate.admit(
+                    kiro_batch(KIRO_OWNER.conversation_id, capture.capture_id, 2, event_id="second")
+                )
+            ),
+            [],
+        )
+        receipt = gate.status(KIRO_OWNER, capture.capture_id)
+        self.assertEqual(receipt.queued_spans, 1)
+        self.assertIn("capture_limit", receipt.gaps)
+
     def test_unknown_spans_do_not_assign_gaps_to_other_conversations(self):
         self.start()
         self.start(OTHER)
@@ -430,21 +509,28 @@ class RecordingGateTests(unittest.TestCase):
 
     def test_kiro_events_must_match_the_active_capture_id(self):
         first = self.gate.start(KIRO_OWNER, "first", str(uuid4()))
-        admitted = spans(self.gate.admit(kiro_batch(KIRO_OWNER.conversation_id, first.capture_id, 1)))
+        admitted = spans(
+            self.gate.admit(kiro_batch(KIRO_OWNER.conversation_id, first.capture_id, 1))
+        )
         self.assertEqual(len(admitted), 1)
         stopped = self.gate.stop(KIRO_OWNER, first.capture_id)
         self.gate.tick(now_ns=stopped.drain_deadline_ns)
         second = self.gate.start(KIRO_OWNER, "second", str(uuid4()))
-        self.assertEqual(spans(self.gate.admit(kiro_batch(KIRO_OWNER.conversation_id, first.capture_id, 2))), [])
+        self.assertEqual(
+            spans(self.gate.admit(kiro_batch(KIRO_OWNER.conversation_id, first.capture_id, 2))), []
+        )
         self.assertEqual(self.gate.status(KIRO_OWNER, second.capture_id).queued_spans, 0)
-        self.assertEqual(len(spans(self.gate.admit(kiro_batch(KIRO_OWNER.conversation_id, second.capture_id, 3)))), 1)
+        self.assertEqual(
+            len(
+                spans(self.gate.admit(kiro_batch(KIRO_OWNER.conversation_id, second.capture_id, 3)))
+            ),
+            1,
+        )
         self.assertEqual(self.gate.receiver_gaps["kiro:capture_mismatch"], 1)
 
     def test_kiro_drain_accepts_only_event_ids_in_the_frozen_manifest(self):
         capture = self.gate.start(KIRO_OWNER, "task", str(uuid4()))
-        stopping = self.gate.stop(
-            KIRO_OWNER, capture.capture_id, observed_event_ids=("event-a",)
-        )
+        stopping = self.gate.stop(KIRO_OWNER, capture.capture_id, observed_event_ids=("event-a",))
 
         admitted = spans(
             self.gate.admit(
@@ -459,14 +545,12 @@ class RecordingGateTests(unittest.TestCase):
 
         self.assertEqual(len(admitted), 1)
         self.assertEqual(rejected, [])
+        self.assertEqual(self.gate.status(KIRO_OWNER, capture.capture_id).state, "draining")
         self.assertEqual(
-            self.gate.status(KIRO_OWNER, capture.capture_id).state, "draining"
+            self.gate.status(KIRO_OWNER, capture.capture_id).gaps, ("late_unobserved_operation",)
         )
-        self.assertEqual(self.gate.status(KIRO_OWNER, capture.capture_id).gaps, ("late_unobserved_operation",))
         self.gate.tick(now_ns=stopping.drain_deadline_ns)
-        self.assertEqual(
-            self.gate.status(KIRO_OWNER, capture.capture_id).state, "incomplete"
-        )
+        self.assertEqual(self.gate.status(KIRO_OWNER, capture.capture_id).state, "incomplete")
 
     def test_unmatched_kiro_hook_observation_is_incomplete_after_verified_readback(self):
         capture = self.gate.start(KIRO_OWNER, "partial hook", str(uuid4()))
@@ -536,6 +620,82 @@ class RecordingGateTests(unittest.TestCase):
 
 
 class RecordingHttpTests(unittest.IsolatedAsyncioTestCase):
+    async def test_both_sources_storage_outage_expires_without_false_success(self):
+        with tempfile.TemporaryDirectory() as directory:
+            engine = aio_sqlite_engine(
+                URL.create("sqlite+aiosqlite", database=str(Path(directory) / "outage.db")),
+                migrate=False,
+            )
+            attempted = asyncio.Event()
+
+            @asynccontextmanager
+            async def unavailable():
+                attempted.set()
+                raise OSError("Injected storage outage")
+                yield
+
+            try:
+                async with engine.begin() as connection:
+                    await connection.run_sync(models.Base.metadata.create_all)
+                db = DbSessionFactory(_db(engine), "sqlite")
+                writer_db = DbSessionFactory(unavailable, "sqlite")
+                gate = RecordingGate(drain_grace_sec=1)
+                self.app.state.recording_gate = gate
+                writer = BulkInserter(
+                    writer_db,
+                    event_queue=SimpleQueue(),
+                    span_cost_calculator=SpanCostCalculator(GenerativeModelStore(db)),
+                    managed_span_max_age_sec=0.02,
+                    sleep=0.001,
+                    span_retry_delay_sec=0.001,
+                    span_retry_max_delay_sec=0.001,
+                    shutdown_drain_sec=0.05,
+                )
+                captures = []
+                with self.assertLogs("phoenix.db.bulk_inserter", level="WARNING"):
+                    async with writer as (_, enqueue_span, _):
+                        self.enqueue_span = enqueue_span
+                        for owner in (OWNER, KIRO_OWNER):
+                            start = await self.client.post(
+                                "/v1/recordings/start",
+                                json=dict(
+                                    asdict(owner), task="storage outage", request_id=str(uuid4())
+                                ),
+                            )
+                            capture = start.json()["capture_id"]
+                            request = (
+                                batch((501, owner, 0))
+                                if owner.source == "codex"
+                                else kiro_batch(
+                                    owner.conversation_id, capture, 502, event_id="failed-event"
+                                )
+                            )
+                            self.assertEqual((await self.send(request)).status_code, 200)
+                            stopped = await self.client.post(
+                                "/v1/recordings/stop", json=dict(asdict(owner), capture_id=capture)
+                            )
+                            captures.append((owner, capture, stopped.json()["drain_deadline_ns"]))
+                        await asyncio.wait_for(attempted.wait(), timeout=1)
+                        await asyncio.sleep(0.05)
+                for owner, capture, deadline in captures:
+                    gate.tick(now_ns=deadline)
+                    self.assertTrue(gate.begin_readback(capture))
+                    result = await read_recording_spans(
+                        db,
+                        capture_id=capture,
+                        expected_span_keys=set(gate.expected_span_keys(capture)),
+                    )
+                    receipt = gate.complete_drain(capture, result)
+                    self.assertEqual(receipt.state, "incomplete")
+                    self.assertEqual(receipt.storage, "unverified")
+                    self.assertEqual(receipt.persisted_spans, 0)
+                    self.assertIsNone(receipt.timeline_url)
+                    self.assertIn("storage_unverified", receipt.gaps)
+                async with db() as session:
+                    self.assertEqual(list(await session.scalars(select(models.Span))), [])
+            finally:
+                await engine.dispose()
+
     async def asyncSetUp(self):
         self.app = FastAPI()
         self.app.state.recording_gate = RecordingGate()
@@ -723,7 +883,8 @@ class RecordingHttpTests(unittest.IsolatedAsyncioTestCase):
         engine = aio_sqlite_engine(
             URL.create("sqlite+aiosqlite", database=str(database_path)), migrate=False
         )
-        gate = RecordingGate(drain_grace_sec=0.01)
+        fixed_now = time.time_ns()
+        gate = RecordingGate(drain_grace_sec=0.01, clock_ns=lambda: fixed_now)
         self.app.state.recording_gate = gate
         try:
             async with engine.begin() as connection:
@@ -738,15 +899,11 @@ class RecordingHttpTests(unittest.IsolatedAsyncioTestCase):
                 self.enqueue_span = enqueue_span
                 codex_start = await self.client.post(
                     "/v1/recordings/start",
-                    json=dict(
-                        asdict(OWNER), task="Codex mixed test", request_id=str(uuid4())
-                    ),
+                    json=dict(asdict(OWNER), task="Codex mixed test", request_id=str(uuid4())),
                 )
                 kiro_start = await self.client.post(
                     "/v1/recordings/start",
-                    json=dict(
-                        asdict(KIRO_OWNER), task="Kiro mixed test", request_id=str(uuid4())
-                    ),
+                    json=dict(asdict(KIRO_OWNER), task="Kiro mixed test", request_id=str(uuid4())),
                 )
                 self.assertEqual(codex_start.status_code, 200, codex_start.text)
                 self.assertEqual(kiro_start.status_code, 200, kiro_start.text)
@@ -837,9 +994,7 @@ class RecordingHttpTests(unittest.IsolatedAsyncioTestCase):
 
                 async with db() as session:
                     persisted = list(await session.scalars(select(models.Span)))
-                capture_ids = [
-                    row.attributes["recording"]["capture_id"] for row in persisted
-                ]
+                capture_ids = [row.attributes["recording"]["capture_id"] for row in persisted]
                 self.assertEqual(capture_ids.count(codex_capture), 1)
                 self.assertEqual(capture_ids.count(kiro_capture), 2)
 
@@ -915,12 +1070,109 @@ class RecordingHttpTests(unittest.IsolatedAsyncioTestCase):
                 self.assertNotEqual(next_capture, kiro_capture)
 
                 async with db() as session:
-                    session_ids = list(await session.scalars(select(models.ProjectSession.session_id)))
-                self.assertCountEqual(
-                    session_ids, [codex_capture, kiro_capture, next_capture]
-                )
+                    session_ids = list(
+                        await session.scalars(select(models.ProjectSession.session_id))
+                    )
+                self.assertCountEqual(session_ids, [codex_capture, kiro_capture, next_capture])
         finally:
             await engine.dispose()
+
+    async def test_cancelled_controller_and_missing_stop_expire_with_persisted_results(self):
+        with tempfile.TemporaryDirectory() as directory:
+            engine = aio_sqlite_engine(
+                URL.create("sqlite+aiosqlite", database=str(Path(directory) / "cancel.db")),
+                migrate=False,
+            )
+            now = [time.time_ns()]
+            gate = RecordingGate(clock_ns=lambda: now[0], idle_lease_sec=1, drain_grace_sec=1)
+            self.app.state.recording_gate = gate
+            try:
+                async with engine.begin() as connection:
+                    await connection.run_sync(models.Base.metadata.create_all)
+                db = DbSessionFactory(_db(engine), "sqlite")
+                inserter = BulkInserter(
+                    db,
+                    event_queue=SimpleQueue(),
+                    span_cost_calculator=SpanCostCalculator(GenerativeModelStore(db)),
+                )
+                async with inserter as (_, enqueue_span, _):
+                    self.enqueue_span = enqueue_span
+                    for scenario_index, scenario in enumerate(
+                        ("controller_cancel", "missing_stop")
+                    ):
+                        for owner_index, owner in enumerate((OWNER, KIRO_OWNER)):
+                            with self.subTest(scenario=scenario, source=owner.source):
+                                started = await self.client.post(
+                                    "/v1/recordings/start",
+                                    json=dict(
+                                        asdict(owner), task=scenario, request_id=str(uuid4())
+                                    ),
+                                )
+                                capture = started.json()["capture_id"]
+                                index = 100 + scenario_index * 2 + owner_index
+                                message = (
+                                    batch((index, owner, 0))
+                                    if owner.source == "codex"
+                                    else kiro_batch(
+                                        owner.conversation_id, capture, index, event_id=str(uuid4())
+                                    )
+                                )
+                                for resource in message.resource_spans:
+                                    for group in resource.scope_spans:
+                                        for span in group.spans:
+                                            span.trace_id = uuid4().bytes
+                                            span.start_time_unix_nano = now[0] + 1
+                                            span.end_time_unix_nano = now[0] + 2
+                                if scenario == "controller_cancel":
+                                    sent = asyncio.Event()
+
+                                    async def record_then_stop():
+                                        self.assertEqual(
+                                            (await self.send(message)).status_code, 200
+                                        )
+                                        sent.set()
+                                        await asyncio.Event().wait()
+                                        await self.client.post(
+                                            "/v1/recordings/stop",
+                                            json=dict(asdict(owner), capture_id=capture),
+                                        )
+
+                                    controller = asyncio.create_task(record_then_stop())
+                                    await asyncio.wait_for(sent.wait(), timeout=2)
+                                    controller.cancel()
+                                    with self.assertRaises(asyncio.CancelledError):
+                                        await controller
+                                else:
+                                    self.assertEqual((await self.send(message)).status_code, 200)
+                                now[0] += 2_000_000_000
+                                gate.tick()
+                                self.assertEqual(gate.status(owner, capture).state, "draining")
+                                now[0] += 2_000_000_000
+                                gate.tick()
+                                self.assertTrue(gate.begin_readback(capture))
+                                for _ in range(100):
+                                    result = await read_recording_spans(
+                                        db,
+                                        capture_id=capture,
+                                        expected_span_keys=set(gate.expected_span_keys(capture)),
+                                    )
+                                    if result.storage == "verified":
+                                        break
+                                    await asyncio.sleep(0.02)
+                                receipt = gate.complete_drain(capture, result)
+                                self.assertEqual(receipt.state, "incomplete")
+                                self.assertEqual(receipt.storage, "verified")
+                                self.assertEqual(receipt.persisted_spans, 1)
+                                self.assertIn("idle_lease_expired", receipt.gaps)
+                                self.assertIsNotNone(receipt.timeline_url)
+                                self.assertEqual(spans(gate.admit(message)), [])
+                                status = await self.client.post(
+                                    "/v1/recordings/status",
+                                    json=dict(asdict(owner), capture_id=capture),
+                                )
+                                self.assertEqual(status.json()["persisted_spans"], 1)
+            finally:
+                await engine.dispose()
 
 
 if __name__ == "__main__":

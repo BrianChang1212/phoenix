@@ -1,6 +1,7 @@
 import json
 import os
 import sqlite3
+import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 from time import time_ns
@@ -11,6 +12,8 @@ from uuid import NAMESPACE_URL, UUID, uuid4, uuid5
 from opentelemetry.proto.collector.trace.v1.trace_service_pb2 import ExportTraceServiceRequest
 from opentelemetry.proto.common.v1.common_pb2 import KeyValue
 from opentelemetry.proto.trace.v1.trace_pb2 import Span
+
+from phoenix.server.recording_lifetime import LifetimeBinding, LifetimeProbe, LifetimeReason
 
 Source = Literal["codex", "kiro"]
 RECORDING_PROJECT = "task-recordings"
@@ -50,6 +53,7 @@ class CaptureReceipt:
     project_name: str = RECORDING_PROJECT
     timeline_url: Optional[str] = None
     manifest_complete: bool = True
+    lifetime_protection: Optional[Literal["server"]] = None
 
 
 @dataclass
@@ -64,13 +68,16 @@ class _Capture:
     hard_deadline_ns: int = 0
     drain_deadline_ns: Optional[int] = None
     persisted_spans: int = 0
-    state: Literal["recording", "draining", "observed", "incomplete", "empty", "failed"] = "recording"
+    state: Literal["recording", "draining", "observed", "incomplete", "empty", "failed"] = (
+        "recording"
+    )
     admitted: set[tuple[bytes, bytes]] = field(default_factory=set)
     gaps: set[str] = field(default_factory=set)
     storage: Literal["unverified", "partial", "verified"] = "unverified"
     timeline_url: Optional[str] = None
     observed_event_ids: set[str] = field(default_factory=set)
     manifest_complete: bool = True
+    lifetime_protection: Optional[Literal["server"]] = None
 
     def receipt(self) -> CaptureReceipt:
         return CaptureReceipt(
@@ -91,7 +98,16 @@ class _Capture:
             storage=self.storage,
             timeline_url=self.timeline_url,
             manifest_complete=self.manifest_complete,
+            lifetime_protection=self.lifetime_protection if self.state == "recording" else None,
         )
+
+
+@dataclass(frozen=True)
+class BoundLifetime:
+    capture_id: str
+    owner: ConversationKey
+    binding: LifetimeBinding
+    probe: LifetimeProbe
 
 
 class _RecordingLedger:
@@ -105,7 +121,7 @@ class _RecordingLedger:
             self._lock_file.flush()
         self._lock_file.seek(0)
         try:
-            if os.name == "nt":
+            if sys.platform == "win32":
                 import msvcrt
 
                 msvcrt.locking(self._lock_file.fileno(), msvcrt.LK_NBLCK, 1)
@@ -149,7 +165,8 @@ class _RecordingLedger:
         elif version == 1:
             with self._db:
                 self._db.execute(
-                    "ALTER TABLE captures ADD COLUMN idle_lease_deadline_ns INTEGER NOT NULL DEFAULT 0"
+                    "ALTER TABLE captures ADD COLUMN idle_lease_deadline_ns "
+                    "INTEGER NOT NULL DEFAULT 0"
                 )
                 self._db.execute(
                     "ALTER TABLE captures ADD COLUMN hard_deadline_ns INTEGER NOT NULL DEFAULT 0"
@@ -224,9 +241,25 @@ class _RecordingLedger:
             "drain_deadline_ns, persisted_spans, storage, timeline_url, observed_event_ids, "
             "manifest_complete, gaps FROM captures"
         ):
-            (capture_id, source, conversation_id, task, request_id, state, started, stopped,
-             idle_deadline, hard_deadline, drain_deadline, persisted, storage, timeline_url,
-             observed_event_ids, manifest_complete, gaps) = row
+            (
+                capture_id,
+                source,
+                conversation_id,
+                task,
+                request_id,
+                state,
+                started,
+                stopped,
+                idle_deadline,
+                hard_deadline,
+                drain_deadline,
+                persisted,
+                storage,
+                timeline_url,
+                observed_event_ids,
+                manifest_complete,
+                gaps,
+            ) = row
             owner = ConversationKey(source, conversation_id)
             capture = _Capture(
                 owner=owner,
@@ -295,12 +328,23 @@ class _RecordingLedger:
             "observed_event_ids=excluded.observed_event_ids, "
             "manifest_complete=excluded.manifest_complete, gaps=excluded.gaps",
             (
-                capture.capture_id, capture.owner.source, capture.owner.conversation_id,
-                capture.task, capture.request_id, capture.state, capture.started_at_ns,
-                capture.stopped_at_ns, capture.idle_lease_deadline_ns, capture.hard_deadline_ns,
-                capture.drain_deadline_ns, capture.persisted_spans, capture.storage,
-                capture.timeline_url, json.dumps(sorted(capture.observed_event_ids)),
-                int(capture.manifest_complete), json.dumps(sorted(capture.gaps)),
+                capture.capture_id,
+                capture.owner.source,
+                capture.owner.conversation_id,
+                capture.task,
+                capture.request_id,
+                capture.state,
+                capture.started_at_ns,
+                capture.stopped_at_ns,
+                capture.idle_lease_deadline_ns,
+                capture.hard_deadline_ns,
+                capture.drain_deadline_ns,
+                capture.persisted_spans,
+                capture.storage,
+                capture.timeline_url,
+                json.dumps(sorted(capture.observed_event_ids)),
+                int(capture.manifest_complete),
+                json.dumps(sorted(capture.gaps)),
             ),
         )
 
@@ -310,7 +354,7 @@ class _RecordingLedger:
             del self._db
         if not self._lock_file.closed:
             try:
-                if os.name == "nt":
+                if sys.platform == "win32":
                     import msvcrt
 
                     self._lock_file.seek(0)
@@ -364,7 +408,7 @@ class RecordingGate:
         max_ancestor_depth: int = 128,
         max_request_bytes: int = 8 * 1024 * 1024,
         ledger_path: Optional[Path] = None,
-        drain_grace_sec: float = 5.0,
+        drain_grace_sec: float = 15.0,
         idle_lease_sec: float = 30 * 60,
         hard_limit_sec: float = 2 * 60 * 60,
         clock_ns: Callable[[], int] = time_ns,
@@ -406,9 +450,7 @@ class RecordingGate:
             raise ValueError("Recording Timeline origin must be loopback HTTP(S)")
         self._timeline_origin = timeline_origin.rstrip("/")
         self._ledger = _RecordingLedger(ledger_path, database_binding) if ledger_path else None
-        self._captures, self._commands = (
-            self._ledger.load() if self._ledger else ({}, {})
-        )
+        self._captures, self._commands = self._ledger.load() if self._ledger else ({}, {})
         self._active: dict[ConversationKey, _Capture] = {}
         self._readback_attempted = {
             capture.capture_id
@@ -416,19 +458,29 @@ class RecordingGate:
             if capture.state in ("observed", "empty", "failed")
             or capture.state == "incomplete"
             and (
-                "receiver_restart" not in capture.gaps
-                or "storage_readback_failed" in capture.gaps
+                "receiver_restart" not in capture.gaps or "storage_readback_failed" in capture.gaps
             )
         }
         self.receiver_gaps: dict[str, int] = {}
+        self._lifetimes: dict[str, BoundLifetime] = {}
 
-    def start(self, owner: ConversationKey, task: str, request_id: str) -> CaptureReceipt:
+    def start(
+        self,
+        owner: ConversationKey,
+        task: str,
+        request_id: str,
+        *,
+        lifetime: Optional[LifetimeBinding] = None,
+    ) -> CaptureReceipt:
         if not task.strip() or len(task) > 200:
             raise ValueError("Task name must contain 1 to 200 characters")
         UUID(request_id)
         if previous := self._commands.get((owner, request_id)):
             if previous.task != task:
                 raise ValueError("Request ID was already used for another task")
+            guard = self._lifetimes.get(previous.capture_id)
+            if previous.state == "recording" and (guard.binding if guard else None) != lifetime:
+                raise ValueError("An active recording lifetime binding cannot be changed")
             return previous.receipt()
         if owner in self._active:
             raise ValueError("This conversation already has an active recording")
@@ -440,6 +492,18 @@ class RecordingGate:
         capture.idle_lease_deadline_ns = min(
             capture.started_at_ns + self.idle_lease_ns, capture.hard_deadline_ns
         )
+        guard = (
+            BoundLifetime(
+                capture.capture_id,
+                owner,
+                lifetime,
+                LifetimeProbe(lifetime, capture.hard_deadline_ns),
+            )
+            if lifetime is not None
+            else None
+        )
+        if guard is not None:
+            capture.lifetime_protection = "server"
         # The durable receipt is the admission fence. Never expose the capture
         # to this receiver until persistence succeeds.
         if self._ledger:
@@ -447,7 +511,37 @@ class RecordingGate:
         self._captures[capture.capture_id] = capture
         self._commands[owner, request_id] = capture
         self._active[owner] = capture
+        if guard is not None:
+            self._lifetimes[capture.capture_id] = guard
         return capture.receipt()
+
+    def active_lifetimes(self) -> tuple[BoundLifetime, ...]:
+        for capture_id in tuple(self._lifetimes):
+            capture = self._captures.get(capture_id)
+            if (
+                capture is None
+                or capture.state != "recording"
+                or self._active.get(capture.owner) is not capture
+            ):
+                self._lifetimes.pop(capture_id, None)
+        return tuple(self._lifetimes.values())
+
+    def stop_for_lifetime(
+        self,
+        guard: BoundLifetime,
+        reason: LifetimeReason,
+    ) -> Optional[CaptureReceipt]:
+        if self._lifetimes.get(guard.capture_id) is not guard:
+            return None
+        capture = self._captures[guard.capture_id]
+        if capture.state != "recording" or capture.owner != guard.owner:
+            return None
+        capture.gaps.add(reason)
+        return self.stop(
+            guard.owner,
+            guard.capture_id,
+            manifest_complete=guard.owner.source != "kiro",
+        )
 
     def status(
         self, owner: ConversationKey, capture_id: Optional[str] = None
@@ -488,6 +582,7 @@ class RecordingGate:
             capture.state = "draining"
             if self._ledger:
                 self._ledger.save_capture(capture)
+            self._lifetimes.pop(capture_id, None)
         return capture.receipt()
 
     def tick(self, *, now_ns: Optional[int] = None) -> tuple[CaptureReceipt, ...]:
@@ -508,6 +603,7 @@ class RecordingGate:
                     capture.stopped_at_ns = now
                     capture.drain_deadline_ns = now + self.drain_grace_ns
                     capture.state = "draining"
+                    self._lifetimes.pop(capture.capture_id, None)
                     if self._ledger:
                         self._ledger.save_capture(capture)
             if (
@@ -595,11 +691,7 @@ class RecordingGate:
             capture.gaps.add("missing_persisted_spans")
         project_id = getattr(result, "project_relay_id", None)
         session_id = getattr(result, "session_relay_id", None)
-        if (
-            capture.storage in ("partial", "verified")
-            and project_id
-            and session_id
-        ):
+        if capture.storage in ("partial", "verified") and project_id and session_id:
             capture.timeline_url = (
                 f"{self._timeline_origin}/projects/{quote(project_id, safe='')}"
                 f"/sessions/{quote(session_id, safe='')}?sessionView=timeline"
@@ -622,6 +714,7 @@ class RecordingGate:
         self.receiver_gaps[key] = self.receiver_gaps.get(key, 0) + 1
 
     def admit(self, request: ExportTraceServiceRequest) -> ExportTraceServiceRequest:
+        self.tick()
         observations = []
         for resource in request.resource_spans:
             for scope in resource.scope_spans:
@@ -648,9 +741,7 @@ class RecordingGate:
                 ]
                 identity = values[0] if values else None
                 capture_ids = [
-                    a.value.string_value
-                    for a in span.attributes
-                    if a.key == "recording.capture_id"
+                    a.value.string_value for a in span.attributes if a.key == "recording.capture_id"
                 ]
                 capture_id = capture_ids[0] if capture_ids else None
                 key = source, span.trace_id, span.span_id
@@ -662,9 +753,7 @@ class RecordingGate:
                     conflicts.add(key)
                 evidence[key] = span, identity, capture_id
 
-        def owner_of(
-            source: Source, span: Span
-        ) -> Optional[tuple[ConversationKey, Optional[str]]]:
+        def owner_of(source: Source, span: Span) -> Optional[tuple[ConversationKey, Optional[str]]]:
             owners = set()
             capture_ids = set()
             seen = set()
@@ -745,6 +834,10 @@ class RecordingGate:
                             and event_ids
                             and event_ids <= capture.observed_event_ids
                         ):
+                            if len(capture.admitted) >= self.max_capture_spans:
+                                capture.gaps.add("capture_limit")
+                                dirty_captures[capture.capture_id] = capture
+                                continue
                             capture.admitted.add(span_key)
                             dirty_captures[capture.capture_id] = capture
                             admitted_keys.setdefault(capture.capture_id, set()).add(span_key)
@@ -762,10 +855,9 @@ class RecordingGate:
                     if len(capture.admitted) >= self.max_capture_spans:
                         capture.gaps.add("capture_limit")
                         capture.stopped_at_ns = self._clock_ns()
-                        capture.drain_deadline_ns = (
-                            capture.stopped_at_ns + self.drain_grace_ns
-                        )
+                        capture.drain_deadline_ns = capture.stopped_at_ns + self.drain_grace_ns
                         capture.state = "draining"
+                        self._lifetimes.pop(capture.capture_id, None)
                         dirty_captures[capture.capture_id] = capture
                         continue
                     capture.admitted.add(span_key)
@@ -782,6 +874,7 @@ class RecordingGate:
         return output
 
     def close(self) -> None:
+        self._lifetimes.clear()
         if self._ledger:
             self._ledger.close()
             self._ledger = None

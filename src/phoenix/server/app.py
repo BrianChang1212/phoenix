@@ -70,8 +70,8 @@ from phoenix.config import (
     get_env_allowed_sandbox_providers,
     get_env_csrf_trusted_origins,
     get_env_database_allocated_storage_capacity_gibibytes,
-    get_env_database_usage_insertion_blocking_threshold_percentage,
     get_env_database_connection_str,
+    get_env_database_usage_insertion_blocking_threshold_percentage,
     get_env_disable_agent_assistant,
     get_env_enable_mcp_server,
     get_env_enable_oauth2_authorization_server,
@@ -86,8 +86,8 @@ from phoenix.config import (
     get_env_model_cost_manifest_url,
     get_env_phoenix_agents_disable_bash,
     get_env_port,
-    get_working_dir,
     get_env_support_email,
+    get_working_dir,
     server_instrumentation_is_enabled,
     server_log_export_is_enabled,
     verify_server_environment_variables,
@@ -173,7 +173,7 @@ from phoenix.server.oauth2 import OAuth2Clients
 from phoenix.server.oauth2_authorization_server import public_origin
 from phoenix.server.prometheus import SPAN_QUEUE_REJECTIONS
 from phoenix.server.recording import RecordingGate
-from phoenix.server.recording_readback import read_recording_spans
+from phoenix.server.recording_readback import settle_recording_spans
 from phoenix.server.redaction import Redactor, current_redactor
 from phoenix.server.retention import TraceDataSweeper
 from phoenix.server.sandbox._download import prefetch_wasm_binary_if_needed
@@ -779,6 +779,8 @@ def _lifespan(
                     )
             recording_gate = getattr(app.state, "recording_gate", None)
             if recording_gate is not None:
+                from phoenix.server.recording_lifetime import maintain_lifetimes
+
                 async def maintain_recordings() -> None:
                     while True:
                         now_ns = time_ns()
@@ -787,15 +789,12 @@ def _lifespan(
                             if not recording_gate.begin_readback(receipt.capture_id):
                                 continue
                             try:
-                                result = await asyncio.wait_for(
-                                    read_recording_spans(
-                                        db,
-                                        capture_id=receipt.capture_id,
-                                        expected_span_keys=set(
-                                            recording_gate.expected_span_keys(receipt.capture_id)
-                                        ),
+                                result = await settle_recording_spans(
+                                    db,
+                                    capture_id=receipt.capture_id,
+                                    expected_span_keys=set(
+                                        recording_gate.expected_span_keys(receipt.capture_id)
                                     ),
-                                    timeout=5,
                                 )
                                 recording_gate.complete_drain(receipt.capture_id, result)
                             except Exception:
@@ -808,13 +807,16 @@ def _lifespan(
                         await asyncio.sleep(1)
 
                 recording_task = asyncio.create_task(maintain_recordings())
+                lifetime_task = asyncio.create_task(maintain_lifetimes(recording_gate))
 
                 async def stop_recording_maintenance() -> None:
-                    recording_task.cancel()
-                    try:
-                        await recording_task
-                    except asyncio.CancelledError:
-                        pass
+                    for task in (lifetime_task, recording_task):
+                        task.cancel()
+                    for task in (lifetime_task, recording_task):
+                        try:
+                            await task
+                        except asyncio.CancelledError:
+                            pass
                     recording_gate.close()
 
                 stack.push_async_callback(stop_recording_maintenance)

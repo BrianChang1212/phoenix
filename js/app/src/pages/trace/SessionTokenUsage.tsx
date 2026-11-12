@@ -111,6 +111,9 @@ function TokenUsageCard({
           <span>快取 {format(counts.cacheRead)}（已含輸入）</span>
         )}
       </div>
+      {usage.coverage === "crosses_recording_boundary" && (
+        <div role="note">含跨錄製邊界用量，非錄製區間專屬</div>
+      )}
       <details>
         <summary>用量來源</summary>
         <div>

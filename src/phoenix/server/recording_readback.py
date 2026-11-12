@@ -1,3 +1,4 @@
+import asyncio
 from dataclasses import dataclass
 from typing import Literal, Optional
 
@@ -9,6 +10,39 @@ from phoenix.server.recording import RECORDING_PROJECT
 from phoenix.server.types import DbSessionFactory
 
 SpanKey = tuple[str, str]
+
+
+async def settle_recording_spans(
+    db: DbSessionFactory,
+    *,
+    capture_id: str,
+    expected_span_keys: set[SpanKey] | frozenset[SpanKey],
+    timeout_sec: float = 5.0,
+    retry_interval_sec: float = 0.1,
+) -> "RecordingReadback":
+    """Re-read concurrent commits within one budget, preserving the last complete read."""
+    if timeout_sec <= 0 or retry_interval_sec <= 0:
+        raise ValueError("Readback deadline and interval must be positive")
+    expected = frozenset(expected_span_keys)
+    deadline = asyncio.get_running_loop().time() + timeout_sec
+    latest: Optional[RecordingReadback] = None
+    try:
+        async with asyncio.timeout(timeout_sec):
+            while True:
+                latest = await read_recording_spans(
+                    db, capture_id=capture_id, expected_span_keys=expected
+                )
+                if latest.storage == "verified" or not expected:
+                    return latest
+                remaining = deadline - asyncio.get_running_loop().time()
+                if remaining <= 0:
+                    break
+                await asyncio.sleep(min(retry_interval_sec, remaining))
+    except TimeoutError:
+        if latest is None:
+            raise
+    assert latest is not None
+    return latest
 
 
 @dataclass(frozen=True)
@@ -101,9 +135,7 @@ async def read_recording_spans(
     if project_rowid is None or session_rowid is None:
         return RecordingReadback(expected, frozenset(persisted), "unverified")
 
-    storage: Literal["partial", "verified"] = (
-        "verified" if persisted == expected else "partial"
-    )
+    storage: Literal["partial", "verified"] = "verified" if persisted == expected else "partial"
     return RecordingReadback(
         expected_span_keys=expected,
         persisted_span_keys=frozenset(persisted),

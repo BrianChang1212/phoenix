@@ -23,12 +23,9 @@ import {
 import { ToastRegion } from "@phoenix/components/core/toast/ToastRegion";
 import { APP_FLOATING_Z_INDEX } from "@phoenix/components/core/zIndex";
 import {
-  AccountMenu,
   Brand,
-  GitHubLink,
   NavBreadcrumb,
   NavLink,
-  NavSeparator,
   NavTitle,
   SideNavbar,
   SideNavToggleButton,
@@ -36,9 +33,7 @@ import {
   TopNavActionsSlot,
   TopNavbar,
   useResponsiveSideNav,
-  VersionUpdateNotice,
 } from "@phoenix/components/nav";
-import { GlobalSearch } from "@phoenix/components/search";
 import { useAgentContext } from "@phoenix/contexts/AgentContext";
 import { useOwnedPreloadedQuery } from "@phoenix/hooks";
 
@@ -294,7 +289,7 @@ function SideNavWithCounts({
   return <SideNavContent isExpanded={isExpanded} counts={counts} />;
 }
 
-function SideNavContent({
+export function SideNavContent({
   isExpanded,
   counts,
 }: {
@@ -306,9 +301,6 @@ function SideNavContent({
       <Brand />
       <Flex direction="column" justifyContent="space-between" flex="1 1 auto">
         <ul css={sideLinksCSS}>
-          <li key="search">
-            <GlobalSearch isExpanded={isExpanded} />
-          </li>
           <li>
             <NavLink
               to="/projects"
@@ -322,105 +314,15 @@ function SideNavContent({
               isExpanded={isExpanded}
             />
           </li>
-          <li key="dashboards">
-            <NavLink
-              to="/dashboards"
-              text="Dashboards"
-              leadingVisual={<Icon svg={<Icons.Grid />} />}
-              isExpanded={isExpanded}
-            />
-          </li>
-          <li key="datasets">
-            <NavLink
-              to="/datasets"
-              text="Datasets & Experiments"
-              leadingVisual={<Icon svg={<Icons.Database />} />}
-              trailingVisual={
-                counts?.datasetCount != null ? (
-                  <Counter variant="quiet">{counts.datasetCount}</Counter>
-                ) : undefined
-              }
-              isExpanded={isExpanded}
-            />
-          </li>
-          <li key="evaluators">
-            <NavLink
-              to="/evaluators"
-              text="Evaluators"
-              leadingVisual={<Icon svg={<Icons.Scale />} />}
-              trailingVisual={
-                counts?.evaluatorCount != null ? (
-                  <Counter variant="quiet">{counts.evaluatorCount}</Counter>
-                ) : undefined
-              }
-              isExpanded={isExpanded}
-            />
-          </li>
-          {/* The generative workbench: destinations for talking to models
-              directly rather than observing an application. */}
-          <NavSeparator key="generative-start" isExpanded={isExpanded} />
-          <li key="prompts">
-            <NavLink
-              to="/prompts"
-              text="Prompts"
-              leadingVisual={<Icon svg={<Icons.MessageSquare />} />}
-              trailingVisual={
-                counts?.promptCount != null ? (
-                  <Counter variant="quiet">{counts.promptCount}</Counter>
-                ) : undefined
-              }
-              isExpanded={isExpanded}
-            />
-          </li>
-          <li key="playground">
-            <NavLink
-              to="/playground"
-              text="Playground"
-              leadingVisual={<Icon svg={<Icons.PlayCircle />} />}
-              isExpanded={isExpanded}
-            />
-          </li>
-          <li key="chat">
-            <NavLink
-              to="/chat"
-              text="Chat"
-              leadingVisual={<Icon svg={<Icons.MessageCircle />} />}
-              isExpanded={isExpanded}
-            />
-          </li>
-          <NavSeparator key="generative-end" isExpanded={isExpanded} />
-          <li key="rest-api">
-            <NavLink
-              to="/apis/rest"
-              text="REST API"
-              leadingVisual={<Icon svg={<Icons.Code />} />}
-              isExpanded={isExpanded}
-            />
-          </li>
-          <li key="graphql">
-            <NavLink
-              to="/apis/graphql"
-              text="GraphQL"
-              leadingVisual={<Icon svg={<Icons.GraphQL />} />}
-              isExpanded={isExpanded}
-            />
-          </li>
         </ul>
         <ul css={bottomLinksCSS}>
-          <VersionUpdateNotice isExpanded={isExpanded} />
-          <li key="github">
-            <GitHubLink isExpanded={isExpanded} />
-          </li>
-          <li key="settings">
+          <li>
             <NavLink
               to="/settings"
               text="Settings"
               leadingVisual={<Icon svg={<Icons.Options />} />}
               isExpanded={isExpanded}
             />
-          </li>
-          <li key="account">
-            <AccountMenu isExpanded={isExpanded} />
           </li>
         </ul>
       </Flex>

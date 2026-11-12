@@ -127,9 +127,8 @@ describe("SessionTimeline live updates", () => {
     const source = container.querySelector<HTMLSelectElement>(
       '[aria-label="操作來源"]'
     );
-    const turn = container.querySelector<HTMLSelectElement>(
-      '[aria-label="輪次"]'
-    );
+    const turn =
+      container.querySelector<HTMLSelectElement>('[aria-label="輪次"]');
     await act(async () => {
       if (search) {
         Object.getOwnPropertyDescriptor(
@@ -231,10 +230,19 @@ describe("SessionTimeline live updates", () => {
       .mockResolvedValue(updated);
     await mount();
     const block = container.querySelector<HTMLButtonElement>(
-      '[aria-label="檢查測試 · +1–3 秒"]'
+      '[aria-label="選擇時間軸區段"]'
     );
     expect(block).not.toBeNull();
-    await act(async () => block?.click());
+    if (block) {
+      vi.spyOn(block, "getBoundingClientRect").mockReturnValue(
+        new DOMRect(0, 0, 600, 48)
+      );
+      await act(async () =>
+        block.dispatchEvent(
+          new MouseEvent("click", { bubbles: true, detail: 1, clientX: 400 })
+        )
+      );
+    }
     await act(async () => vi.advanceTimersByTimeAsync(5000));
     expect(container.querySelector("h3")?.textContent).toBe("檢查測試");
   });

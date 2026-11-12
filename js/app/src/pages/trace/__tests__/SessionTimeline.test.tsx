@@ -63,6 +63,86 @@ describe("SessionTimeline", () => {
     container.remove();
   });
 
+  it("opens individually timed dense segments and keeps keyboard selection available", () => {
+    const denseData: SessionTimelineData = {
+      ...data,
+      operations: [
+        {
+          ...data.operations[0],
+          startTime: 487,
+          endTime: 721,
+          summary: "First dense tool",
+        },
+        {
+          ...data.operations[1],
+          startTime: 5296,
+          endTime: 6208,
+          summary: "Second dense tool",
+        },
+        {
+          ...data.operations[0],
+          id: "tail",
+          summary: "Last dense tool",
+          startTime: 1833999,
+          endTime: 1834000,
+        },
+      ],
+    };
+    act(() =>
+      root.render(
+        <MemoryRouter>
+          <SessionTimeline data={denseData} />
+        </MemoryRouter>
+      )
+    );
+    const axis = container.querySelector<HTMLButtonElement>(
+      '[aria-label="選擇時間軸區段"]'
+    );
+    expect(axis).not.toBeNull();
+    if (!axis) return;
+    vi.spyOn(axis, "getBoundingClientRect").mockReturnValue(
+      new DOMRect(0, 0, 1000, 48)
+    );
+    act(() =>
+      axis.dispatchEvent(
+        new MouseEvent("click", { bubbles: true, detail: 1, clientX: 1 })
+      )
+    );
+    const chooser = container.querySelector('[aria-label="密集區段選擇"]');
+    expect(chooser?.textContent).toContain("First dense tool");
+    expect(chooser?.textContent).toContain("Second dense tool");
+    expect(chooser?.textContent).not.toContain("平行操作");
+    const second = [...(chooser?.querySelectorAll("button") ?? [])].find(
+      (button) => button.textContent?.includes("Second dense tool")
+    );
+    act(() => second?.click());
+    expect(
+      container.querySelector('[aria-label="操作詳細資訊"]')?.textContent
+    ).toContain("Second dense tool");
+    act(() =>
+      axis.dispatchEvent(
+        new KeyboardEvent("keydown", { key: "ArrowLeft", bubbles: true })
+      )
+    );
+    expect(axis.getAttribute("aria-describedby")).toBeTruthy();
+    act(() =>
+      axis.dispatchEvent(
+        new KeyboardEvent("keydown", { key: "Home", bubbles: true })
+      )
+    );
+    expect(
+      container.querySelector('[aria-label="操作詳細資訊"]')?.textContent
+    ).toContain("First dense tool");
+    act(() =>
+      axis.dispatchEvent(
+        new KeyboardEvent("keydown", { key: "End", bubbles: true })
+      )
+    );
+    expect(
+      container.querySelector('[aria-label="操作詳細資訊"]')?.textContent
+    ).toContain("Last dense tool");
+  });
+
   it("selects a complete operation description and links to its original trace", () => {
     act(() =>
       root.render(
@@ -152,9 +232,8 @@ describe("SessionTimeline", () => {
         </MemoryRouter>
       )
     );
-    const select = container.querySelector<HTMLSelectElement>(
-      '[aria-label="輪次"]'
-    );
+    const select =
+      container.querySelector<HTMLSelectElement>('[aria-label="輪次"]');
     expect(select).not.toBeNull();
     expect(select?.options.length).toBe(3);
     act(() => {
@@ -216,10 +295,19 @@ describe("SessionTimeline", () => {
       )
     );
     const parallel = container.querySelector<HTMLButtonElement>(
-      '[aria-label="平行操作 · +2–4 秒"]'
+      '[aria-label="選擇時間軸區段"]'
     );
     expect(parallel).not.toBeNull();
-    act(() => parallel?.click());
+    if (parallel) {
+      vi.spyOn(parallel, "getBoundingClientRect").mockReturnValue(
+        new DOMRect(0, 0, 600, 48)
+      );
+      act(() =>
+        parallel.dispatchEvent(
+          new MouseEvent("click", { bubbles: true, detail: 1, clientX: 300 })
+        )
+      );
+    }
     const model = Array.from(
       container.querySelectorAll<HTMLButtonElement>(
         '[aria-label="平行操作選擇"] button'
@@ -229,9 +317,8 @@ describe("SessionTimeline", () => {
     const details = container.querySelector('[aria-label="操作詳細資訊"]');
     expect(details?.textContent).toContain("模型分析");
     expect(details?.textContent).toContain("4.00 秒");
-    const select = container.querySelector<HTMLSelectElement>(
-      '[aria-label="輪次"]'
-    );
+    const select =
+      container.querySelector<HTMLSelectElement>('[aria-label="輪次"]');
     expect(select).not.toBeNull();
     act(() => {
       if (select) {

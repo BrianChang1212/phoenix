@@ -33,7 +33,7 @@ Phoenix 的本機錄製功能只在明確呼叫 start 後收集指定 Codex 或 
 
 `state` 可能為 `recording`、`draining`、`observed`、`empty`、`incomplete` 或 `failed`；`storage` 可能為 `unverified`、`partial` 或 `verified`。
 
-- Stop 先回傳 `draining`。Drain deadline 到期後，watchdog 以 Phoenix 的 primary DB session 比對每個預期 `(trace_id, span_id)`、capture provenance、project 與 session。讀取失敗有逾時上限；失敗結果標為 incomplete，且不產生 Timeline URL。
+- Stop 先回傳 `draining`。預設 drain grace 為 15 秒；截止後在共用 5 秒回讀預算內，以新的 primary DB session 每 100 ms 重查預期 `(trace_id, span_id)`、capture provenance、project 與 session。全部驗證後立即結束；預算用完保留最後完整查詢的部分結果與真實 Session 連結；首次查詢即失敗則不產生 Timeline URL。重查不重開接收，也不延長 drain deadline。
 - 只有 exact readback 全部成功、storage verified 且沒有 gap，收據才會是 `observed`。空 capture 回傳 `empty`。
 - Capture span 上限觸發時停止接收新 span，保留已收到的資料進行 drain/readback，並以 `capture_limit` gap 標為 incomplete。若 Phoenix 已有實際的 Relay project/session ID，仍可提供部分結果的 Timeline URL。
 - Phoenix process restart 會把原本 recording/draining 的收據標為 incomplete，不會恢復 span admission；watchdog 可對已記錄的 span 身分做一次有限 readback。
@@ -45,6 +45,6 @@ Phoenix 的本機錄製功能只在明確呼叫 start 後收集指定 Codex 或 
 
 `make test-recording-gate` 執行接收器與 readback unittest；`make check-recording-gate` 檢查 receiver、readback、BulkInserter、Prometheus 及其測試檔。
 
-這些測試使用本機 HTTP fixture 與 SQLite 測試資料庫。尚未在目前執行中的 Phoenix service、實際 Codex session 或實際 Kiro session 上驗證端到端持久化、Timeline 顯示或 token 完整度；不得將測試結果描述為 live service 已驗證。
+這些測試使用本機 HTTP fixture 與 SQLite 測試資料庫。另已在隔離 16016／14327 服務，以合成 Codex／Kiro 資料驗證 HTTP 持久化、十組負載與真正瀏覽器 Timeline；未在目前使用中的 Phoenix service、實際 Codex session 或實際 Kiro session 上驗證完整錄製或 Token。隔離合成驗收不得描述為真實客戶端驗收。
 
-待完成的 live 測量是從 stop 到對應 Codex trace export／Kiro hook event 抵達 Phoenix 的延遲分布（至少 p50、p95 與最大值），並確認目前 5 秒 drain grace 能涵蓋實際尾端事件；另需用 live heap 量測確認 64 MiB estimated cap 對應的實際記憶體上限。完成前，這些 deadline 與記憶體值都應視為暫定設定。
+隔離 HTTP 負載曾在 5 秒 grace 下只驗證 996／1,000 筆，最後全部寫入；另一次 5 秒 grace 加 5 秒回讀仍只有 939 筆。因此目前調整為 15 秒 grace 加共用 5 秒回讀，需以重測確認適用範圍。實際 Codex export／Kiro hook 尾端延遲分布仍屬 Ticket 04；64 MiB 是 writer 的估計受管佇列上限，並非整個服務 RSS 上限。
