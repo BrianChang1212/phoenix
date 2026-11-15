@@ -37,8 +37,59 @@ export function hierarchyKey(traceId: string, spanId: string) {
   return JSON.stringify([traceId, spanId]);
 }
 
+export function isHierarchyObservation(node: HierarchyNode) {
+  const attributes = node.span.attributes;
+  return (
+    attributes["kiro.record_kind"] ===
+      "event observation; no operation duration" ||
+    (typeof attributes["kiro.observation_semantics"] === "string" &&
+      attributes["kiro.observation_semantics"].trim().length > 0)
+  );
+}
+
+export function hierarchyToolResult(node: HierarchyNode): string | null {
+  const result = node.span.attributes["kiro.result"];
+  let label: string;
+  switch (result) {
+    case "success":
+      label = "success · 工具回報成功";
+      break;
+    case "error":
+      label = "error · 失敗";
+      break;
+    case "timeout":
+      label = "timeout · 逾時";
+      break;
+    case "denied":
+      label = "denied · 權限遭拒";
+      break;
+    default:
+      return null;
+  }
+  const exitCode = node.span.attributes["kiro.exit_code"];
+  if (
+    (typeof exitCode === "number" && Number.isInteger(exitCode)) ||
+    (typeof exitCode === "string" && /^-?\d+$/.test(exitCode))
+  )
+    return `${label} · exit ${exitCode}`;
+  return label;
+}
+
+export function hierarchyHasError(node: HierarchyNode) {
+  const result = node.span.attributes["kiro.result"];
+  return (
+    node.span.status_code === "ERROR" ||
+    result === "error" ||
+    result === "timeout" ||
+    result === "denied"
+  );
+}
+
 export function hierarchyCategory(node: HierarchyNode): HierarchyCategory {
   const name = node.span.name;
+  if (isHierarchyObservation(node)) return "other";
+  if (name === "kiro.observed_tool_window" || name === "kiro.session")
+    return "flow";
   if (/persist_rollout|append_items/.test(name)) return "storage";
   if (
     node.span.span_kind === "LLM" ||
@@ -141,13 +192,15 @@ export function buildSessionHierarchy(
 
 export function visibleHierarchyRows(
   hierarchy: SessionHierarchy,
-  expanded: ReadonlySet<string>
+  expanded: ReadonlySet<string>,
+  showObservations = false
 ) {
   const rows: HierarchyNode[] = [];
   const pending = [...hierarchy.roots].reverse();
   while (pending.length) {
     const node = pending.pop();
     if (!node) continue;
+    if (!showObservations && isHierarchyObservation(node)) continue;
     rows.push(node);
     if (expanded.has(node.key)) pending.push(...[...node.children].reverse());
   }

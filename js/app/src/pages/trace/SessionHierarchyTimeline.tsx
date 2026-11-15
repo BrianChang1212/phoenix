@@ -6,6 +6,9 @@ import {
   buildSessionHierarchy,
   hierarchyCategory,
   hierarchyCategoryStyle,
+  hierarchyHasError,
+  hierarchyToolResult,
+  isHierarchyObservation,
   visibleHierarchyRows,
   type HierarchyNode,
 } from "./sessionHierarchy";
@@ -236,7 +239,10 @@ function duration(node: HierarchyNode, observedAt: number) {
 }
 
 function status(node: HierarchyNode) {
+  if (isHierarchyObservation(node)) return "觀測事件 · 非操作耗時";
   if (node.endTime === null) return "進行中 · 暫時耗時";
+  const toolResult = hierarchyToolResult(node);
+  if (toolResult !== null) return toolResult;
   if (node.span.status_code === "ERROR") return "ERROR · 失敗";
   if (node.span.status_code === "OK") return "OK · 成功";
   return "UNSET · 未知";
@@ -257,12 +263,17 @@ export function SessionHierarchyTimeline({
   const [expanded, setExpanded] = useState(
     () =>
       new Set(
-        hierarchy.nodes.filter((node) => node.depth < 2).map((node) => node.key)
+        data.source === "kiro"
+          ? []
+          : hierarchy.nodes
+              .filter((node) => node.depth < 2)
+              .map((node) => node.key)
       )
   );
+  const [showObservations, setShowObservations] = useState(false);
   const [selectedKey, setSelectedKey] = useState<string | null>(null);
   const [rawOpen, setRawOpen] = useState(false);
-  const rows = visibleHierarchyRows(hierarchy, expanded);
+  const rows = visibleHierarchyRows(hierarchy, expanded, showObservations);
   const selected = hierarchy.nodes.find((node) => node.key === selectedKey);
   const startTime = hierarchy.nodes.length
     ? Math.min(...hierarchy.nodes.map((node) => node.startTime))
@@ -295,7 +306,7 @@ export function SessionHierarchyTimeline({
       <h2>階層時間軸</h2>
       <div className="hierarchy-muted">
         {data.source.toUpperCase()} · {hierarchy.nodes.length} spans ·
-        Y：parent_id 父子階層
+        {data.operations.length} 操作 · Y：parent_id 父子階層
       </div>
       {refreshControls}
       {missing > 0 && (
@@ -319,6 +330,19 @@ export function SessionHierarchyTimeline({
         <button type="button" onClick={() => setExpanded(new Set())}>
           全部收合
         </button>
+        {data.source === "kiro" && (
+          <button
+            type="button"
+            aria-pressed={showObservations}
+            onClick={() => {
+              setShowObservations((current) => !current);
+              setSelectedKey(null);
+              setRawOpen(false);
+            }}
+          >
+            {showObservations ? "隱藏觀測事件" : "顯示觀測事件"}
+          </button>
+        )}
         <span className="hierarchy-muted">
           X：真實起訖時間；內部呼叫不等於業務步驟
         </span>
@@ -381,9 +405,7 @@ export function SessionHierarchyTimeline({
                     aria-label={`時間條 ${node.span.name}`}
                     aria-pressed={selectedKey === node.key}
                     title={`${name} · ${category.label} · ${status(node)}`}
-                    className={
-                      node.span.status_code === "ERROR" ? "error" : undefined
-                    }
+                    className={hierarchyHasError(node) ? "error" : undefined}
                     style={{
                       left: `${((node.startTime - startTime) / total) * 100}%`,
                       width: `${width}%`,
@@ -421,7 +443,11 @@ export function SessionHierarchyTimeline({
           <div className="hierarchy-result">
             <strong>{selected.operation?.summary ?? selected.span.name}</strong>
             <span className="hierarchy-status">{status(selected)}</span>
-            <span>{(duration(selected, observedAt) / 1000).toFixed(3)} 秒</span>
+            {!isHierarchyObservation(selected) && (
+              <span>
+                {(duration(selected, observedAt) / 1000).toFixed(3)} 秒
+              </span>
+            )}
             <button
               type="button"
               aria-label="關閉呼叫結果"
