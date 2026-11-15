@@ -2,15 +2,47 @@
 
 此功能延伸專案既有的追蹤 Sessions 列表，於 Session 詳情加入 Timeline 頁籤。它不是內建 assistant 的 AgentSession，也不建立第二套 Session 資料庫。
 
+## 現行階層版本（2026-11-15）
+
+正式入口為 <http://127.0.0.1:6006>，已部署`recording-releases/20261115-r4-hierarchy-timeline`。功能程式來源為`c1d3a38fa`，後續文件提交不代表重建前端。前端manifest SHA-256為`409c3d6ae705cc44e1fb4e187b6c758d24ee233263f23a2faf3a304aa801aa6a`。817個後端檔案與前一版r3逐檔相同，原venv、資料庫、錄製規則及migrations設定不變。
+
+X軸為實際起訖時間，每個原始span獨立一列。Y軸縮排來自同一Session、同一trace的`parent_id`，不以時間重疊推斷父子；缺少上層及循環關係明示。Kiro只顯示已錄入的觀測區段及工具，不補造深層模型呼叫。Kiro預設收合分支，重複觀測事件預設隱藏，可切換追查。
+
+畫面採近黑綠底、細格線、等寬字體與亮綠控制。工具為藍、模型為紫、流程為青綠、寫入為黃、觀測／其他為灰；類型色不代表結果。`UNSET`保持未知，Kiro工具的result與exit code各自保留。觀測事件不當作可靠操作耗時。
+
+| 操作 | 方法 |
+| --- | --- |
+| 縮放 | 時間條區滾輪以游標位置縮放，或按＋／－；導覽區聚焦後也可按＋／－ |
+| 平移 | 拖曳主時間軸，或導覽區聚焦後按左右方向鍵 |
+| 框選 | Shift＋拖曳主時間軸，或在108px全程縮圖直接框選 |
+| 調整範圍 | 拖曳縮圖左右把手；把手聚焦後可按左右方向鍵 |
+| 回到全程 | 全程按鈕，或導覽區聚焦後按Home |
+| 查看結果 | 點名稱或時間條，只顯示單筆摘要；Esc關閉摘要並保留Session側欄 |
+| 深入追查 | 展開「查看原始資料」並開啟原始Trace；「用量與輪次分析」保留舊分析能力 |
+
+自動刷新保留有效選取、範圍、分支、觀測篩選與捲動。移除聚焦節點後回到可用導覽區，不搶其他控制的焦點；移除選取節點會清除過期摘要。暫停取消未完成讀取，恢復立即載入；503失敗保留最後成功畫面及時間，恢復後繼續使用。
+
+本次接受既有窄版限制：390px視窗下外層Layout為400px，新時間軸本身寬度與scrollWidth均319px，深層名稱及結果仍可操作。這是明示接受的10px外層溢出，沒有宣稱整頁溢出已修復。
+
+固定功能來源的7檔47項定向測試、前端型別檢查、建置及獨立Standards／Spec複查完成。獨立發布操作判定為PASS+NOTES。正式6006的Codex35 spans／深度11、Kiro3 spans／1工具及Kiro2092 spans／1033工具，皆通過實際API瀏覽器驗收，無page errors或外部請求。動態加入／移除及進行中轉完成以公開UI fixture驗證，不能提升為生產持續寫入race的實測；未執行性能benchmark，也未宣稱全repo或雲端CI通過。
+
+本機限定證據位於`D:/Brian/tasks/.scratch/phoenix-hierarchy-timeline/`的`results.md`及`deployment.md`；正式瀏覽器收據與截圖位於`D:/Brian/.tmp/phoenix-hierarchy-20261115/production-{codex,kiro3,kiro2092}/`。舊release與失敗證據均保留，隔離服務已停止，正式6006／4317保持loopback運行。
+
+### r4啟動與限定回復
+
+啟動沿用`D:/Brian/tools/phoenix/start-sessions.ps1`，停止沿用`D:/Brian/tools/phoenix/stop.ps1`。已在運行時不要重複啟動。
+
+本次切換收據、`startup.before`及`parent-receipt.before.json`位於r4的`rollout/backend-switch/`；master安裝收據仍為r1的`rollout/receipt.json`。回復r3前先停止服務，確認6006／4317無監聽，核對目前啟動檔符合切換收據的installed_sha256，才可還原這兩個匹配備份並重新啟動。不要使用master整包restore撤除既有錄製設定，也不要把歷史`start.ps1`原版入口當成r3回復。完整限定步驟記於本機`deployment.md`。
+
 ## 精簡導覽
 
 2026-11-12 起，本機前端側欄只顯示 `Tracing` 與 `Settings`，不提供進階入口。其他原生模組與路由保留，這是導覽精簡，不是存取權限限制。專案首頁預設導向 Sessions，保留網址中的篩選條件；明確指定的 Spans／Traces 路徑仍可使用。
 
 選取 Session 或直接開啟未指定有效 `sessionView` 的 Session 網址，預設顯示 Timeline；明確選擇 Turns／Traces／Annotations 仍有效。日常流程為 `Tracing → 專案 → Sessions → Session → Timeline → 操作詳情`，可由詳情開啟原始 Trace。此調整不改變錄製方式，也不修補原生 Codex 缺少 `session.id` 的接入問題。
 
-本機入口為 <http://127.0.0.1:6006>，啟停命令不變。現行產物為 `D:\Brian\tools\phoenix\recording-releases\20261112-r3-dense-timeline`，817個後端及26個前端檔案已逐檔核對。密集時間軸由同一命中表面提供有時間標示的候選區段，操作清單可捲動，保留真實平行關係、時間及全部操作。真Kiro大型資料2092 spans／1033操作在隔離與正式服務通過點選、鍵盤、503恢復及原始Trace返回驗證，桌面與窄視窗截圖保存在本機驗收目錄 `D:\Brian\.tmp\phoenix-on-demand-recording-20261112\dense-production-large-browser`。
+前一版r3為2026-11-12的密集操作時間軸，已由上方r4階層版本取代。r3的817個後端、26個前端及2092 spans驗收證據保留於`D:/Brian/.tmp/phoenix-on-demand-recording-20261112/dense-production-large-browser`，不把舊版畫面當成r4驗收。
 
-按需錄製的介面與資料限制見[接收器說明](../../local-recording-receiver.md)。復原master收據為 `recording-releases\20261112-r1\rollout\receipt.json`；本次切換前啟動檔保存在r3的 `rollout\backend-switch`。先停止服務，再依限定安裝工具的收據復原匹配雜湊檔案，最後重啟；不覆蓋現行SQLite，舊release與原始備份保留。
+按需錄製的介面與資料限制見[接收器說明](../../local-recording-receiver.md)。現行r4切換前的啟動檔保存在r4的`rollout/backend-switch`，回復方式依上方現行版本，不覆蓋SQLite。
 
 ## 資料與來源
 
@@ -34,7 +66,9 @@ Sessions 列表的 Source 選單使用現有 Session DSL 在伺服器端篩選�
 
 初次直接開啟 Session URL 時，Layout 會等共用 DrawerPlane 註冊後，才在 route Suspense 中掛載 Outlet；沒有 OverlayFrame 的使用方式保留原本 fallback。這避免 Drawer 在初次載入取得 null host 後持續不顯示。已以真正 document load、原始 Trace 導航後返回驗證，不依賴點擊分頁或調整視窗補救。
 
-## 已部署的本機版本
+## 歷史：2026-11-11前端部署
+
+以下保留當時入口與驗證紀錄；現行版本及r4回復應使用本文件開頭說明。
 
 2026-11-11 技術部署與實際 `http://127.0.0.1:6006` 驗證已通過；使用者視覺驗收仍待確認。前端由 source commit `fef9baf5b` 建置，release 為 `D:/Brian/tools/phoenix/frontend-releases/20261111-sessions-fef9baf5b`。產物內保存相同 Python runner，沿用原安裝版 Phoenix 21.0.0 backend；沒有覆寫原 venv 或資料庫。
 
@@ -78,14 +112,14 @@ python scripts/serve-session-frontend.py --server-dir <artifact-root> -- serve -
 ## 瀏覽器驗證工具
 
 ```powershell
-node js/app/scripts/verify-session-timeline.mjs --base-url http://127.0.0.1:6007 --output-dir <new-evidence-directory>
+node js/app/scripts/verify-session-timeline.mjs --hierarchy --base-url http://127.0.0.1:6007 --output-dir <new-evidence-directory> --project task-recordings --session-id <capture-uuid> --source codex
 ```
 
-工具只接受 loopback HTTP，使用專案 Playwright 與已安裝 Edge，預設選取已知驗證用途的 Codex／Kiro Session。它從 Sessions 列表與 Source 選單進入 Timeline，比對所選操作的原始 span 連結與耗時，並以可見用量來源比對原始 span Token；驗證鍵盤選取、暫停／恢復、選取保留，以及來源有資料時的輪次／平行操作。另對所選 Session GET 注入一次 503，確認舊畫面與時間保留，移除攔截後確認恢復；這是受控瀏覽器故障，不修改資料庫。最後實際導航原始 Trace 並返回。輸出桌面、窄視窗截圖及 `verification.json`；不輸出原始模型輸入或工具內容。輸出目錄必須為空，不覆寫既有證據。截圖是實際 runtime 驗證的產物，只有腳本語法通過不能視為頁面通過。
+工具只接受loopback HTTP，使用專案Playwright與已安裝Edge。現行主視圖使用`--hierarchy`模式，核對完整分頁及parent深度、滑鼠／鍵盤縮放、平移、框選、雙把手、短span選取、刷新捲動保留、390px深層名稱及原始Trace往返。對Session GET注入一次503後移除攔截，確認原資料、時間與閱讀狀態保留並恢復；這是瀏覽器受控故障，不修改資料庫。省略`--hierarchy`會驗證已保留的次層分析，不得用來替代階層主視圖驗收。輸出桌面、窄版截圖及`verification.json`，不輸出原始模型輸入或工具正文。輸出目錄必須為空，不覆寫證據；只有語法檢查不能視為runtime通過。
 
 可用 `--project`、`--session-id`、`--source codex|kiro` 指定其他已授權的驗證資料。測試結束會關閉本工具開啟的瀏覽器；服務生命週期仍由呼叫端的 process guard 管理。
 
-## 驗證紀錄
+## 歷史：2026-11-11驗證紀錄
 
 票 01–04 分別已有資料／頁面、輪次與聯集計時、Token、即時更新的 RED→GREEN 紀錄。早期來源篩選曾以 DSL 字串後綴拆解造成截斷；目前 Source 使用獨立 URL 狀態，再於查詢邊界組合，使用者手寫條件不改寫。
 
