@@ -291,7 +291,14 @@ describe("Session Token usage", () => {
     expect(
       container.querySelector('[aria-label="Session Token"]')?.textContent
     ).toContain("350");
-    const button = [...container.querySelectorAll("button")].find((el) =>
+    const analysis = container.querySelector<HTMLDetailsElement>(
+      '[aria-label="用量與輪次分析"]'
+    );
+    if (!analysis) throw new Error("Missing usage analysis disclosure");
+    act(() => {
+      analysis.open = true;
+    });
+    const button = [...analysis.querySelectorAll("button")].find((el) =>
       el.textContent?.includes("第二次模型呼叫")
     );
     expect(button).toBeDefined();

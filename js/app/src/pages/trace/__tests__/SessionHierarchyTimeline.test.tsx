@@ -148,4 +148,24 @@ describe("Session hierarchy timeline", () => {
     ).toBe("1");
     expect(button("選取 valid root")).not.toBeNull();
   });
+
+  it("clears a removed selection and explains why without selecting a replacement", () => {
+    render();
+    act(() => button("選取 unified_exec.exec_command")?.click());
+    render({
+      ...data,
+      spans: data.spans.filter((span) => span.context.span_id !== "leaf"),
+    });
+    expect(container.querySelector('[aria-label="選取的呼叫結果"]')).toBeNull();
+    expect(
+      container.querySelector('[aria-label="選取狀態"]')?.textContent
+    ).toContain("選取的呼叫已不在最新資料中");
+    expect(
+      container.querySelector('[role="treeitem"][aria-selected="true"]')
+    ).toBeNull();
+    render();
+    expect(container.querySelector('[aria-label="選取的呼叫結果"]')).toBeNull();
+    act(() => button("選取 exec")?.click());
+    expect(container.querySelector('[aria-label="選取狀態"]')).toBeNull();
+  });
 });

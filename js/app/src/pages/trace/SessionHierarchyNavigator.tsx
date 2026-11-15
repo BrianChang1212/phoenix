@@ -173,7 +173,7 @@ export function SessionHierarchyNavigator({
               }}
             >
               <rect
-                x={Math.max(0, position - 7)}
+                x={Math.max(0, Math.min(986, position - 7))}
                 y="7"
                 width="14"
                 height="74"

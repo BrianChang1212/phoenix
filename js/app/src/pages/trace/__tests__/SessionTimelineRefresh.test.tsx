@@ -67,6 +67,76 @@ describe("SessionTimeline live updates", () => {
     );
   }
 
+  it("preserves the visible hierarchy range, selection, collapsed branch and scroll across refresh and 503 recovery", async () => {
+    const first: SessionTimelineData = {
+      ...data,
+      spans: ["root", "child", "leaf", "other"].map((id, index) => ({
+        id: `node-${id}`,
+        name: id,
+        parent_id: index === 1 ? "root" : index === 2 ? "child" : null,
+        context: { span_id: id, trace_id: "trace-1" },
+        span_kind: "UNKNOWN",
+        start_time: "2026-11-11T09:59:00Z",
+        end_time: "2026-11-11T09:59:10Z",
+        status_code: "UNSET",
+        attributes: {},
+        events: [],
+      })),
+    };
+    const updated = {
+      ...first,
+      spans: [
+        ...first.spans,
+        {
+          ...first.spans[3],
+          id: "new-node",
+          name: "new root",
+          context: { span_id: "new", trace_id: "trace-1" },
+        },
+      ],
+    };
+    vi.mocked(loadSessionTimeline)
+      .mockResolvedValueOnce(first)
+      .mockRejectedValueOnce(new Error("503 unavailable"))
+      .mockResolvedValue(updated);
+    await mount();
+    const press = async (label: string) =>
+      act(async () =>
+        container
+          .querySelector<HTMLButtonElement>(`button[aria-label="${label}"]`)
+          ?.click()
+      );
+    await press("選取 other");
+    await press("收合 root");
+    await press("放大時間軸");
+    const range = container.querySelector(
+      '[aria-label="可視時間範圍"]'
+    )?.textContent;
+    const scroll = container.querySelector<HTMLDivElement>('[role="tree"]');
+    if (scroll) scroll.scrollTop = 81;
+    const updatedAt = container.querySelector("time")?.dateTime;
+    await act(async () => vi.advanceTimersByTimeAsync(5000));
+    expect(container.querySelector('[role="alert"]')?.textContent).toContain(
+      "503 unavailable"
+    );
+    expect(container.querySelector("time")?.dateTime).toBe(updatedAt);
+    await act(async () => vi.advanceTimersByTimeAsync(5000));
+    expect(container.querySelector('[role="alert"]')).toBeNull();
+    expect(
+      container.querySelector('[aria-label="可視時間範圍"]')?.textContent
+    ).toBe(range);
+    expect(
+      container.querySelector('[aria-label="選取的呼叫結果"]')?.textContent
+    ).toContain("other");
+    expect(
+      container.querySelector('[role="treeitem"][aria-label="child"]')
+    ).toBeNull();
+    expect(scroll?.scrollTop).toBe(81);
+    expect(
+      container.querySelector('[role="treeitem"][aria-label="new root"]')
+    ).not.toBeNull();
+  });
+
   it("pauses automatic updates and refreshes immediately when resumed", async () => {
     vi.mocked(loadSessionTimeline).mockResolvedValue(data);
     await mount();
@@ -127,8 +197,9 @@ describe("SessionTimeline live updates", () => {
     const source = container.querySelector<HTMLSelectElement>(
       '[aria-label="操作來源"]'
     );
-    const turn =
-      container.querySelector<HTMLSelectElement>('[aria-label="輪次"]');
+    const turn = container.querySelector<HTMLSelectElement>(
+      '[aria-label="輪次"]'
+    );
     await act(async () => {
       if (search) {
         Object.getOwnPropertyDescriptor(

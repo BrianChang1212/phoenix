@@ -1,5 +1,5 @@
 import { css } from "@emotion/react";
-import { useMemo, useState, type ReactNode } from "react";
+import { useEffect, useMemo, useState, type ReactNode } from "react";
 import { Link } from "react-router";
 
 import {
@@ -56,6 +56,7 @@ const hierarchyCSS = css`
     font-size: 11px;
   }
   .hierarchy-controls,
+  .timeline-controls,
   .hierarchy-legend,
   .hierarchy-result {
     display: flex;
@@ -281,9 +282,17 @@ export function SessionHierarchyTimeline({
   );
   const [showObservations, setShowObservations] = useState(false);
   const [selectedKey, setSelectedKey] = useState<string | null>(null);
+  const [selectionRemoved, setSelectionRemoved] = useState(false);
   const [rawOpen, setRawOpen] = useState(false);
   const rows = visibleHierarchyRows(hierarchy, expanded, showObservations);
   const selected = hierarchy.nodes.find((node) => node.key === selectedKey);
+  useEffect(() => {
+    if (selectedKey !== null && !selected) {
+      setSelectedKey(null);
+      setSelectionRemoved(true);
+      setRawOpen(false);
+    }
+  }, [selectedKey, selected]);
   const startTime = hierarchy.nodes.length
     ? Math.min(...hierarchy.nodes.map((node) => node.startTime))
     : observedAt;
@@ -306,6 +315,7 @@ export function SessionHierarchyTimeline({
   ).length;
   function select(node: HierarchyNode) {
     setSelectedKey(node.key);
+    setSelectionRemoved(false);
     setRawOpen(false);
   }
   function toggle(node: HierarchyNode) {
@@ -324,6 +334,11 @@ export function SessionHierarchyTimeline({
         {data.operations.length} 操作 · Y：parent_id 父子階層
       </div>
       {refreshControls}
+      {selectionRemoved && (
+        <p role="status" aria-label="選取狀態">
+          選取的呼叫已不在最新資料中，請重新選取。
+        </p>
+      )}
       {missing > 0 && (
         <p className="hierarchy-boundary">上層未錄入 · {missing} 個分支</p>
       )}
@@ -427,7 +442,9 @@ export function SessionHierarchyTimeline({
               >
                 <div
                   className="hierarchy-name"
-                  style={{ paddingLeft: Math.min(node.depth * 13, 130) }}
+                  style={{
+                    paddingLeft: `min(${Math.min(node.depth * 13, 130)}px, 35%)`,
+                  }}
                 >
                   {hasChildren ? (
                     <button

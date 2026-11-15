@@ -238,7 +238,10 @@ export function useHierarchyNavigation(
     if (event.key === "ArrowLeft") pan(-0.2);
     if (event.key === "ArrowRight") pan(0.2);
     if (event.key === "Home") reset();
-    if (event.key === "Escape") onEscape();
+    if (event.key === "Escape") {
+      event.stopPropagation();
+      onEscape();
+    }
   }
   useEffect(() => {
     const plot = plotRef.current;

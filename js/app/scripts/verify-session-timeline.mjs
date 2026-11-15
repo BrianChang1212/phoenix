@@ -4,6 +4,8 @@ import { resolve } from "node:path";
 import { parseArgs } from "node:util";
 import { chromium } from "playwright";
 
+import { verifyHierarchy } from "./verify-session-hierarchy.mjs";
+
 const { values } = parseArgs({
   options: {
     "base-url": { type: "string", default: "http://127.0.0.1:6007" },
@@ -12,6 +14,7 @@ const { values } = parseArgs({
     project: { type: "string" },
     "session-id": { type: "string" },
     source: { type: "string" },
+    hierarchy: { type: "boolean", default: false },
   },
 });
 const base = new URL(values["base-url"]);
@@ -269,6 +272,19 @@ try {
   for (const fixture of fixtures) {
     const session = await findSession(fixture);
     const spans = await readSessionSpans(session);
+    if (values.hierarchy) {
+      report.sessions.push(
+        await verifyHierarchy({
+          page,
+          session,
+          spans,
+          fixture,
+          base,
+          outputDir,
+        })
+      );
+      continue;
+    }
     await page.setViewportSize({ width: 1440, height: 1100 });
     const timeRange = new URLSearchParams({
       timeRangeStart: new Date(
@@ -648,6 +664,10 @@ try {
   report.status = "failed";
   report.error = error instanceof Error ? error.message : String(error);
   if (page && !page.isClosed()) {
+    await page.screenshot({
+      path: resolve(outputDir, "failure.png"),
+      fullPage: true,
+    });
     report.failure_page = {
       url: page.url(),
       tabs: await page.getByRole("tab").evaluateAll((elements) =>
@@ -662,6 +682,7 @@ try {
   }
   process.exitCode = 1;
 } finally {
+  report.page_errors = pageErrors;
   await browser?.close();
   await writeFile(
     resolve(outputDir, "verification.json"),

@@ -67,6 +67,25 @@ describe("Hierarchy timeline navigation", () => {
   const range = () =>
     container.querySelector('[aria-label="可視時間範圍"]')?.textContent;
 
+  it("consumes Escape while clearing detail so the enclosing drawer stays open", () => {
+    const outerEscape = vi.fn();
+    document.addEventListener("keydown", outerEscape);
+    act(() => button("選取 exec_command")?.click());
+    const plot = container.querySelector('[aria-label="時間軸導覽區"]');
+    act(() =>
+      plot?.dispatchEvent(
+        new KeyboardEvent("keydown", {
+          key: "Escape",
+          bubbles: true,
+          cancelable: true,
+        })
+      )
+    );
+    expect(container.querySelector('[aria-label="選取的呼叫結果"]')).toBeNull();
+    expect(outerEscape).not.toHaveBeenCalled();
+    document.removeEventListener("keydown", outerEscape);
+  });
+
   it("zooms the real visible range and resets it without clearing selected detail", () => {
     expect(range()).toContain("0.000s → 10.000s");
     act(() => button("選取 exec_command")?.click());
