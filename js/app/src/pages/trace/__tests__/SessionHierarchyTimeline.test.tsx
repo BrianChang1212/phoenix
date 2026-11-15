@@ -54,14 +54,14 @@ describe("Session hierarchy timeline", () => {
     act(() => root.unmount());
     container.remove();
   });
-  function render(value = data) {
+  function render(
+    value = data,
+    observedAt = Date.parse("2026-11-15T00:00:03Z")
+  ) {
     act(() =>
       root.render(
         <MemoryRouter>
-          <SessionTimeline
-            data={value}
-            observedAt={Date.parse("2026-11-15T00:00:03Z")}
-          />
+          <SessionTimeline data={value} observedAt={observedAt} />
         </MemoryRouter>
       )
     );
@@ -167,5 +167,119 @@ describe("Session hierarchy timeline", () => {
     expect(container.querySelector('[aria-label="選取的呼叫結果"]')).toBeNull();
     act(() => button("選取 exec")?.click());
     expect(container.querySelector('[aria-label="選取狀態"]')).toBeNull();
+  });
+
+  it.each(["選取", "時間條"])(
+    "restores timeline keyboard focus when a focused %s node disappears",
+    (control) => {
+      render();
+      const focused = button(`${control} unified_exec.exec_command`);
+      expect(focused).not.toBeNull();
+      act(() => focused?.focus());
+      expect(document.activeElement).toBe(focused);
+      render({
+        ...data,
+        spans: data.spans.filter((span) => span.context.span_id !== "leaf"),
+      });
+      const navigation = container.querySelector<HTMLElement>(
+        '[aria-label="時間軸導覽區"]'
+      );
+      expect(document.activeElement).toBe(navigation);
+      const range = container.querySelector('[aria-label="可視時間範圍"]');
+      const full = range?.textContent;
+      act(() =>
+        document.activeElement?.dispatchEvent(
+          new KeyboardEvent("keydown", { key: "+", bubbles: true })
+        )
+      );
+      expect(range?.textContent).not.toBe(full);
+    }
+  );
+
+  it("does not steal focus from another control when a previously focused node disappears", () => {
+    render();
+    act(() => button("選取 unified_exec.exec_command")?.focus());
+    const other = document.createElement("button");
+    document.body.append(other);
+    try {
+      act(() => other.focus());
+      render({
+        ...data,
+        spans: data.spans.filter((span) => span.context.span_id !== "leaf"),
+      });
+      expect(document.activeElement).toBe(other);
+    } finally {
+      other.remove();
+    }
+  });
+
+  it("replaces provisional raw-span duration and status when the operation completes", () => {
+    const running: SessionTimelineData = {
+      ...data,
+      spans: data.spans.map((span) =>
+        span.context.span_id === "child" ? { ...span, end_time: null } : span
+      ),
+    };
+    render(running);
+    act(() => button("選取 dispatch_tool_call_with_state")?.click());
+    const result = container.querySelector('[aria-label="選取的呼叫結果"]');
+    expect(result?.textContent).toContain("進行中 · 暫時耗時");
+    expect(result?.textContent).toContain("3.000 秒");
+    render(
+      {
+        ...running,
+        spans: running.spans.map((span) =>
+          span.context.span_id === "child"
+            ? {
+                ...span,
+                end_time: "2026-11-15T00:00:04Z",
+                status_code: "OK",
+              }
+            : span
+        ),
+      },
+      Date.parse("2026-11-15T00:00:06Z")
+    );
+    expect(result?.textContent).toContain("OK · 成功");
+    expect(result?.textContent).toContain("4.000 秒");
+    expect(result?.textContent).not.toContain("暫時耗時");
+  });
+
+  it("keeps the zoomed window, selection, collapsed branch and scroll when raw spans extend the full range", () => {
+    render();
+    act(() => button("選取 dispatch_tool_call_with_state")?.click());
+    act(() => button("收合 dispatch_tool_call_with_state")?.click());
+    act(() => button("放大時間軸")?.click());
+    const range = container.querySelector('[aria-label="可視時間範圍"]');
+    const visibleWindow = range?.textContent?.split("·")[0];
+    const tree = container.querySelector<HTMLElement>(
+      '[aria-label="原始呼叫階層"]'
+    );
+    if (tree) tree.scrollTop = 80;
+    const result = container.querySelector('[aria-label="選取的呼叫結果"]');
+    render({
+      ...data,
+      spans: [
+        ...data.spans,
+        {
+          ...span("later", null, "later call"),
+          start_time: "2026-11-15T00:00:12Z",
+          end_time: "2026-11-15T00:00:20Z",
+        },
+      ],
+    });
+    expect(range?.textContent?.split("·")[0]).toBe(visibleWindow);
+    expect(
+      container.querySelector('[aria-label="全程時間軸縮圖"]')?.textContent
+    ).toContain("20.000s");
+    expect(container.querySelector('[aria-label="選取的呼叫結果"]')).toBe(
+      result
+    );
+    expect(result?.textContent).toContain("dispatch_tool_call_with_state");
+    expect(button("展開 dispatch_tool_call_with_state")).not.toBeNull();
+    expect(button("選取 unified_exec.exec_command")).toBeNull();
+    expect(button("選取 later call")).not.toBeNull();
+    expect(button("時間條 later call")).toBeNull();
+    expect(tree?.scrollTop).toBe(80);
   });
 });

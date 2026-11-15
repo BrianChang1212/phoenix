@@ -1,5 +1,5 @@
 import { css } from "@emotion/react";
-import { useEffect, useMemo, useState, type ReactNode } from "react";
+import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { Link } from "react-router";
 
 import {
@@ -284,6 +284,7 @@ export function SessionHierarchyTimeline({
   const [selectedKey, setSelectedKey] = useState<string | null>(null);
   const [selectionRemoved, setSelectionRemoved] = useState(false);
   const [rawOpen, setRawOpen] = useState(false);
+  const focusedControl = useRef<Element | null>(null);
   const rows = visibleHierarchyRows(hierarchy, expanded, showObservations);
   const selected = hierarchy.nodes.find((node) => node.key === selectedKey);
   useEffect(() => {
@@ -308,6 +309,15 @@ export function SessionHierarchyTimeline({
     { start: startTime, end: startTime + total },
     () => setSelectedKey(null)
   );
+  useEffect(() => {
+    if (
+      focusedControl.current &&
+      !focusedControl.current.isConnected &&
+      document.activeElement === document.body
+    ) {
+      navigation.plotRef.current?.focus({ preventScroll: true });
+    }
+  }, [hierarchy, navigation.plotRef]);
   const viewport = navigation.view;
   const viewportTotal = viewport.end - viewport.start;
   const missing = hierarchy.nodes.filter(
@@ -327,7 +337,13 @@ export function SessionHierarchyTimeline({
     });
   }
   return (
-    <section css={hierarchyCSS} aria-label="階層時間軸">
+    <section
+      css={hierarchyCSS}
+      aria-label="階層時間軸"
+      onFocusCapture={(event) => {
+        focusedControl.current = event.target;
+      }}
+    >
       <h2>階層時間軸</h2>
       <div className="hierarchy-muted">
         {data.source.toUpperCase()} · {hierarchy.nodes.length} spans ·
