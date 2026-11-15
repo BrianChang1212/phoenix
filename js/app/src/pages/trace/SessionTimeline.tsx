@@ -2,6 +2,7 @@ import { css } from "@emotion/react";
 import { useId, useState, type ReactNode } from "react";
 import { Link } from "react-router";
 
+import { SessionHierarchyTimeline } from "./SessionHierarchyTimeline";
 import type {
   SessionOperation,
   SessionTimelineData,
@@ -12,9 +13,9 @@ import {
   type DurationKind,
   type TimelineSegment,
 } from "./sessionTimelineDuration";
+import { timelineHitCandidates } from "./sessionTimelineHitTargets";
 import { OperationTokenUsage, SessionTokenSummary } from "./SessionTokenUsage";
 import { useSessionTimelineRefresh } from "./useSessionTimelineRefresh";
-import { timelineHitCandidates } from "./sessionTimelineHitTargets";
 
 const timelineCSS = css`
   padding: 24px;
@@ -337,10 +338,10 @@ function resolveTimelineSelection({
   );
   const selected =
     selection?.kind === "operation"
-      ? rows.find((operation) => operation.id === selection.id) ?? rows[0]
+      ? (rows.find((operation) => operation.id === selection.id) ?? rows[0])
       : selectedSegment
-      ? segmentRows?.[0]
-      : rows[0];
+        ? segmentRows?.[0]
+        : rows[0];
   return {
     selectedSegment,
     segmentRows,
@@ -355,7 +356,7 @@ function useObservationTime(snapshotObservedAt?: number) {
   return snapshotObservedAt ?? initialObservedAt;
 }
 
-export function SessionTimeline({
+function SessionTimelineAnalysis({
   data,
   observedAt: snapshotObservedAt,
   refreshControls,
@@ -433,8 +434,8 @@ export function SessionTimeline({
       segment.operations.length > 1
         ? "平行操作"
         : segment.kind === "gap"
-        ? "未觀測區間"
-        : operation?.summary ?? operation?.name ?? "已篩除操作"
+          ? "未觀測區間"
+          : (operation?.summary ?? operation?.name ?? "已篩除操作")
     } · +${relativeSeconds(segment.startTime)}–${relativeSeconds(
       segment.endTime
     )} 秒`;
@@ -600,8 +601,10 @@ export function SessionTimeline({
                   isParallel
                     ? "平行操作"
                     : segment.kind === "gap"
-                    ? "未觀測區間"
-                    : filtered[0]?.summary ?? filtered[0]?.name ?? "已篩除操作"
+                      ? "未觀測區間"
+                      : (filtered[0]?.summary ??
+                        filtered[0]?.name ??
+                        "已篩除操作")
                 } · +${relativeSeconds(segment.startTime)}–${relativeSeconds(
                   segment.endTime
                 )} 秒`;
@@ -683,12 +686,15 @@ export function SessionTimeline({
                     event.key === "Home"
                       ? 0
                       : event.key === "End"
-                      ? timeline.segments.length - 1
-                      : event.key === "ArrowLeft"
-                      ? Math.max(0, current - 1)
-                      : event.key === "ArrowRight"
-                      ? Math.min(timeline.segments.length - 1, current + 1)
-                      : Math.max(0, current);
+                        ? timeline.segments.length - 1
+                        : event.key === "ArrowLeft"
+                          ? Math.max(0, current - 1)
+                          : event.key === "ArrowRight"
+                            ? Math.min(
+                                timeline.segments.length - 1,
+                                current + 1
+                              )
+                            : Math.max(0, current);
                   const segment = timeline.segments[index];
                   if (segment) {
                     setCandidateTimes([segment.startTime]);
@@ -858,6 +864,25 @@ export function SessionTimeline({
         </>
       )}
     </section>
+  );
+}
+
+export function SessionTimeline(props: {
+  data: SessionTimelineData;
+  observedAt?: number;
+  refreshControls?: ReactNode;
+}) {
+  const observedAt = useObservationTime(props.observedAt);
+  return (
+    <SessionHierarchyTimeline
+      key={props.data.sessionId}
+      data={props.data}
+      observedAt={observedAt}
+      refreshControls={props.refreshControls}
+      analysis={
+        <SessionTimelineAnalysis data={props.data} observedAt={observedAt} />
+      }
+    />
   );
 }
 
