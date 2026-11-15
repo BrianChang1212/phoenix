@@ -9,7 +9,9 @@ import {
   visibleHierarchyRows,
   type HierarchyNode,
 } from "./sessionHierarchy";
+import { SessionHierarchyNavigator } from "./SessionHierarchyNavigator";
 import type { SessionTimelineData } from "./sessionTimelineData";
+import { useHierarchyNavigation } from "./useHierarchyNavigation";
 
 const hierarchyCSS = css`
   --hierarchy-accent: #92ed20;
@@ -65,10 +67,16 @@ const hierarchyCSS = css`
     color: var(--hierarchy-accent);
   }
   .hierarchy-panel {
+    position: relative;
+    touch-action: none;
     border: 1px solid #284c2c;
     border-radius: 6px;
     background: #08140a;
     overflow: hidden;
+  }
+  .hierarchy-panel:focus-visible {
+    outline: 2px solid var(--hierarchy-accent);
+    outline-offset: 2px;
   }
   .hierarchy-ruler,
   .hierarchy-row {
@@ -126,6 +134,7 @@ const hierarchyCSS = css`
     border-left: 1px solid #2d5831;
     background-image: linear-gradient(90deg, #1c3821 1px, transparent 1px);
     background-size: 25% 100%;
+    overflow: hidden;
   }
   .hierarchy-track button {
     position: absolute;
@@ -275,6 +284,12 @@ export function SessionHierarchyTimeline({
       )
     : observedAt;
   const total = Math.max(1, endTime - startTime);
+  const navigation = useHierarchyNavigation(
+    { start: startTime, end: startTime + total },
+    () => setSelectedKey(null)
+  );
+  const viewport = navigation.view;
+  const viewportTotal = viewport.end - viewport.start;
   const missing = hierarchy.nodes.filter(
     (node) => node.parentState === "missing"
   ).length;
@@ -307,6 +322,11 @@ export function SessionHierarchyTimeline({
           個節點；未將異常父子關係當成正常呼叫鏈。
         </p>
       )}
+      <SessionHierarchyNavigator
+        navigation={navigation}
+        nodes={hierarchy.nodes}
+        observedAt={observedAt}
+      />
       <div className="hierarchy-controls">
         <button
           type="button"
@@ -323,12 +343,41 @@ export function SessionHierarchyTimeline({
           X：真實起訖時間；內部呼叫不等於業務步驟
         </span>
       </div>
-      <div className="hierarchy-panel">
+      <div
+        className="hierarchy-panel"
+        ref={navigation.plotRef}
+        tabIndex={0}
+        aria-label="時間軸導覽區"
+        onKeyDown={navigation.keyDown}
+        {...navigation.plotEvents}
+      >
+        {navigation.brush?.surface === "plot" && (
+          <div
+            aria-hidden="true"
+            style={{
+              position: "absolute",
+              zIndex: 2,
+              pointerEvents: "none",
+              top: 0,
+              bottom: 0,
+              left: navigation.brush.left,
+              width: navigation.brush.width,
+              background: "#b1ec7b22",
+              border: "1px solid #b1ec7b",
+            }}
+          />
+        )}
         <div className="hierarchy-ruler">
           <span>父子呼叫</span>
           <div className="hierarchy-ticks">
             {[0, 1, 2, 3, 4].map((tick) => (
-              <span key={tick}>{((total * tick) / 4000).toFixed(2)}s</span>
+              <span key={tick}>
+                {(
+                  (viewport.start - startTime + (viewportTotal * tick) / 4) /
+                  1000
+                ).toFixed(3)}
+                s
+              </span>
             ))}
           </div>
         </div>
@@ -337,7 +386,11 @@ export function SessionHierarchyTimeline({
             const category = hierarchyCategoryStyle[hierarchyCategory(node)];
             const name = node.operation?.summary ?? node.span.name;
             const hasChildren = node.children.length > 0;
-            const width = (duration(node, observedAt) / total) * 100;
+            const nodeEnd =
+              node.endTime ?? Math.max(node.startTime, observedAt);
+            const left = Math.max(viewport.start, node.startTime);
+            const right = Math.min(viewport.end, nodeEnd);
+            const width = Math.max(0, ((right - left) / viewportTotal) * 100);
             return (
               <div
                 key={node.key}
@@ -376,23 +429,25 @@ export function SessionHierarchyTimeline({
                   </button>
                 </div>
                 <div className="hierarchy-track">
-                  <button
-                    type="button"
-                    aria-label={`時間條 ${node.span.name}`}
-                    aria-pressed={selectedKey === node.key}
-                    title={`${name} · ${category.label} · ${status(node)}`}
-                    className={
-                      node.span.status_code === "ERROR" ? "error" : undefined
-                    }
-                    style={{
-                      left: `${((node.startTime - startTime) / total) * 100}%`,
-                      width: `${width}%`,
-                      background: category.color,
-                    }}
-                    onClick={() => select(node)}
-                  >
-                    {width > 20 && <span>{name}</span>}
-                  </button>
+                  {right >= left && (
+                    <button
+                      type="button"
+                      aria-label={`時間條 ${node.span.name}`}
+                      aria-pressed={selectedKey === node.key}
+                      title={`${name} · ${category.label} · ${status(node)}`}
+                      className={
+                        node.span.status_code === "ERROR" ? "error" : undefined
+                      }
+                      style={{
+                        left: `${((left - viewport.start) / viewportTotal) * 100}%`,
+                        width: `${width}%`,
+                        background: category.color,
+                      }}
+                      onClick={() => select(node)}
+                    >
+                      {width > 20 && <span>{name}</span>}
+                    </button>
+                  )}
                 </div>
               </div>
             );
