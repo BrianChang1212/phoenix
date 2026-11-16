@@ -17,6 +17,7 @@ async def settle_recording_spans(
     *,
     capture_id: str,
     expected_span_keys: set[SpanKey] | frozenset[SpanKey],
+    project_name: str = RECORDING_PROJECT,
     timeout_sec: float = 5.0,
     retry_interval_sec: float = 0.1,
 ) -> "RecordingReadback":
@@ -30,7 +31,8 @@ async def settle_recording_spans(
         async with asyncio.timeout(timeout_sec):
             while True:
                 latest = await read_recording_spans(
-                    db, capture_id=capture_id, expected_span_keys=expected
+                    db, capture_id=capture_id, expected_span_keys=expected,
+                    project_name=project_name,
                 )
                 if latest.storage == "verified" or not expected:
                     return latest
@@ -73,6 +75,7 @@ async def read_recording_spans(
     *,
     capture_id: str,
     expected_span_keys: set[SpanKey] | frozenset[SpanKey],
+    project_name: str = RECORDING_PROJECT,
 ) -> RecordingReadback:
     """Return only expected spans durably attached to this recording's real Session.
 
@@ -118,7 +121,7 @@ async def read_recording_spans(
                 )
                 .join(models.Span, models.Span.trace_rowid == models.Trace.id)
                 .where(
-                    models.Project.name == RECORDING_PROJECT,
+                    models.Project.name == project_name,
                     models.ProjectSession.session_id == capture_id,
                     key_filter,
                 )

@@ -1,5 +1,25 @@
 # 本機對話錄製接收器
 
+## Kiro 完整 Session 同步（2026-11-16）
+
+完整模式使用獨立的 `kiro-session-history` 專案，保存選定回合結束前的 Session 可見事件。它與下方 START／STOP 範圍錄製不同，不把歷史內容偽裝成即時 capture。
+
+在目前 Kiro 對話明確呼叫 `phoenix-recording`，並要求「完整 Session」或「全部可見步驟」。控制使用 `FULLSTART <request UUID> <task> RECEIPT <nonce>`、`FULLSTATUS RECEIPT <nonce>`、`FULLSTOP RECEIPT <nonce>`，前綴仍為 `Phoenix recording:`，回條讀取器沿用原入口。Session 身分由原生 hook 提供，不能手填其他對話。
+
+FULLSTOP 停止訂閱後續回合，但保留當前最後 Say／observed turn_end 的同步。Hook 將工作交給 Phoenix 服務持有的有界佇列，不依賴 CLI 子程序持續存活；自然 Stop 再交接最後工作。每次交接刷新 30 秒閒置期限，同一工作有固定兩小時硬期限，最多 128 筆佇列工作；逾時或服務重啟後可由 FULLSTATUS 重新交接原範圍。
+
+`subscribed` 代表授權訂閱，`sync_pending` 代表尚待同步。只有回執同時為 `state=imported`、`storage=verified`、`coverage.complete=true`、`gaps=[]`、`sync_pending=false`，才表示選定來源範圍的支援可見步驟已通過主資料庫讀回。最後回覆尚未結束時，不可能在同一則回覆內宣稱它已保存；應由後續 FULLSTATUS 或外部回條讀取確認。
+
+匯入 API 為 `/v1/recordings/kiro-session/import`，只接受 Session ID、任務標籤與選用 `through_turn_id`。`/queue` 與 `/queue/status` 使用相同欄位且必須指定完成回合邊界。三個入口都限定 loopback、拒絕瀏覽器 Origin，不接受任意檔案路徑或 OTLP spans；公開 `/v1/traces` 仍套用原 managed RecordingGate。
+
+來源由固定本機 Kiro store 查找並核對 metadata、檔案身分與連結邊界。`through_turn_id` 截取到相符 observed turn_end 的原始 JSONL prefix；後續查詢回合不會擴大 FULLSTOP 的範圍。相同來源 prefix 與 schema 版本使用固定 import／span IDs，重試不重複；後續完成回合形成新的 immutable Session 快照。回執保留原 Session ID、SHA-256、最後 record ID、來源／工具／步驟數與缺漏。
+
+支援使用者訊息、助理 Say、工具 call/result、權限互動、Hook 名稱及回合／Session 狀態；工具 call/result 合成一次操作並保留雙方來源 ID、行號與時間。Reasoning、agent_note、steering 與隱藏上下文不匯出。只有來源完成快照時間的步驟畫成時間點，不能當作零耗時或反推出開始時間。Shell 結果以明確 exit code 為準，工具完成不等同業務成功。
+
+來源上限為 32 MiB、50,000 列、每列 1 MiB；單項文字上限 16 KiB，匯入最多 10,000 spans／8 MiB。未知格式、截斷、缺失結果或未完成回合須標示不完整；來源損壞或超限也可能拒絕同步。這不承諾任意 Kiro 版本、外部背景程序或私有模型內部活動全部可觀測。
+
+使用 `make test-kiro-session-history` 驗證 reader、API、queue，`make test-recording-gate` 驗證原 capture／讀回契約。本機使用 Phoenix venv 時可指定 `SESSION_FRONTEND_PYTHON`。
+
 Phoenix 的本機錄製功能只在明確呼叫 start 後收集指定 Codex 或 Kiro 對話的 trace。它不會因為 Phoenix 與 Codex／Kiro 同時開啟，就自動錄下所有對話。
 
 目前的 HTTP 控制端點只接受 loopback 呼叫，並拒絕瀏覽器 `Origin`。這是本機呼叫邊界，不是對 Codex 或 Kiro 執行程序的身分驗證。Codex helper 使用 `CODEX_THREAD_ID` 作為目前對話識別；它不接受使用者自行指定另一個 conversation ID。

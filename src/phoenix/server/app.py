@@ -863,7 +863,12 @@ def _lifespan(
             # Read by the in-process MCP dispatch, which has no server to copy
             # the yielded state into its request scopes.
             app.state.lifespan_state = lifespan_state
-            yield lifespan_state
+            try:
+                yield lifespan_state
+            finally:
+                queue = getattr(app.state, "kiro_session_queue", None)
+                if queue is not None:
+                    await queue.close()
         for callback in shutdown_callbacks:
             if isinstance((res := callback()), Awaitable):
                 await res

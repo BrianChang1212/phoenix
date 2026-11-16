@@ -318,6 +318,9 @@ test-frontend: ## Run frontend tests (js/app/)
 test-session-frontend-runner: ## Validate local frontend artifact runner
 	@$(SESSION_FRONTEND_PYTHON) -m unittest discover -s scripts/tests -p test_serve_session_frontend.py
 
+test-kiro-session-history: ## Verify complete Kiro Session import and coverage
+	@$(SESSION_FRONTEND_PYTHON) -c "import os, pathlib, subprocess, sys; source = str(pathlib.Path('src').resolve()); sys.exit(subprocess.call([sys.executable, '-m', 'unittest', 'discover', '-s', 'scripts/tests', '-p', 'test_kiro_session*.py'], env=dict(os.environ, PYTHONPATH=source)))"
+
 test-recording-gate: ## Verify the local recording receiver contract
 	@$(SESSION_FRONTEND_PYTHON) -c "import os, pathlib, subprocess, sys; source = str(pathlib.Path('src').resolve()); sys.exit(subprocess.call([sys.executable, '-m', 'unittest', 'discover', '-s', 'scripts/tests', '-p', 'test_recording*.py'], env=dict(os.environ, PYTHONPATH=source)))"
 

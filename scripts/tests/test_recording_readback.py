@@ -214,6 +214,21 @@ class RecordingReadbackTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNotNone(result.project_relay_id)
         self.assertIsNotNone(result.session_relay_id)
 
+    async def test_history_readback_requires_its_explicit_project(self):
+        expected = ("01" * 16, "02" * 8)
+        await self.add_span(
+            project_name="kiro-session-history", trace_id=expected[0], span_id=expected[1]
+        )
+        ordinary = await read_recording_spans(
+            self.db, capture_id=self.capture_id, expected_span_keys={expected}
+        )
+        self.assertEqual(ordinary.storage, "unverified")
+        imported = await settle_recording_spans(
+            self.db, capture_id=self.capture_id, expected_span_keys={expected},
+            project_name="kiro-session-history", timeout_sec=1,
+        )
+        self.assertEqual(imported.storage, "verified")
+
     async def test_wrong_project_session_or_capture_provenance_is_not_verified(self):
         expected = ("01" * 16, "02" * 8)
         await self.add_span(
