@@ -2,6 +2,12 @@
 
 此功能延伸專案既有的追蹤 Sessions 列表，於 Session 詳情加入 Timeline 頁籤。它不是內建 assistant 的 AgentSession，也不建立第二套 Session 資料庫。
 
+## 系統架構圖
+
+![本機 Phoenix 系統架構](phoenix-local-architecture.png)
+
+圖由程式碼與設定閱讀得出（2026-11-16，HEAD `5b6360aef`，目前 release r6），未逐段以封包驗證；gRPC `:4317` 是否經過錄製閘門未實測。可編輯原始檔為 [phoenix-local-architecture.html](phoenix-local-architecture.html)。
+
 ## 現行階層版本（2026-11-15）
 
 正式入口為 <http://127.0.0.1:6006>，已部署`recording-releases/20261115-r4-hierarchy-timeline`。功能程式來源為`c1d3a38fa`，後續文件提交不代表重建前端。前端manifest SHA-256為`409c3d6ae705cc44e1fb4e187b6c758d24ee233263f23a2faf3a304aa801aa6a`。817個後端檔案與前一版r3逐檔相同，原venv、資料庫、錄製規則及migrations設定不變。
