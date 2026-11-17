@@ -14,6 +14,8 @@ FULLSTOP 停止訂閱後續回合，但保留當前最後 Say／observed turn_en
 
 來源由固定本機 Kiro store 查找並核對 metadata、檔案身分與連結邊界。`through_turn_id` 截取到相符 observed turn_end 的原始 JSONL prefix；後續查詢回合不會擴大 FULLSTOP 的範圍。相同來源 prefix 與 schema 版本使用固定 import／span IDs，重試不重複；後續完成回合形成新的 immutable Session 快照。回執保留原 Session ID、SHA-256、最後 record ID、來源／工具／步驟數與缺漏。
 
+Sub-agent（schema 5）：`sub_agent_start`／`sub_agent_complete` 成對成為一個 `Sub-agent: <名稱>` span（名稱上限 80 字元，附說明、prompt、response、狀態），掛在發起它的回合之下；`sub-executions/<subSessionId>.jsonl` 內該 sub-agent 自己的 Hook、工具、助理步驟以同一套規則對應並巢狀在其下，樹多一層。`subSessionId` 必須是嚴格 UUID 才會組成路徑，檔案須是 Session 目錄內的一般檔案；不存在才記缺漏碼 `sub_execution_missing`，符號連結、逃出目錄、讀取中被改動或超過上限一律拒絕整個匯入。位元組與列數上限橫跨主檔與所有 sub 檔，SHA-256 涵蓋 sub 檔內容；`through_turn_id` 邊界同時裁切 sub 檔列。只有 start 或只有 complete 記 `unpaired_sub_agent`，時間倒置記 `invalid_sub_agent_interval`；仍在執行的 sub-agent 不標成完成。回合與 sub-agent 的時間窗一律包含其所有子 span（沒有 `turn_end` 的開放回合，終點跟隨最後一筆活動並保留 `open_turn`，不宣稱完成），子 span 的時間不改。大型匯入的讀回期限為 `min(60, 5 + span 數 / 100)` 秒，固定 5 秒曾使約 2500 個 span 的匯入被誤報 `storage_not_verified`。仍在進行的 Session 因 `open_turn`、`unverified_turn_boundary` 與超過 16 KB 的內容截斷，匯入仍會標示不完整。
+
 支援使用者訊息、助理 Say、工具 call/result、權限互動、Hook 名稱及回合／Session 狀態；工具 call/result 合成一次操作並保留雙方來源 ID、行號與時間。Reasoning、agent_note、steering 與隱藏上下文不匯出。只有來源完成快照時間的步驟畫成時間點，不能當作零耗時或反推出開始時間。Shell 結果以明確 exit code 為準，工具完成不等同業務成功。
 
 來源上限為 32 MiB、50,000 列、每列 1 MiB；單項文字上限 16 KiB，匯入最多 10,000 spans／8 MiB。未知格式、截斷、缺失結果或未完成回合須標示不完整；來源損壞或超限也可能拒絕同步。這不承諾任意 Kiro 版本、外部背景程序或私有模型內部活動全部可觀測。
