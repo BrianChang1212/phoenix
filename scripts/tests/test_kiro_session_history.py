@@ -200,7 +200,7 @@ class SessionHistoryTests(unittest.TestCase):
         result = history.build_import(snapshot)
         old_id = str(uuid5(NAMESPACE_URL, "kiro-session-history:" + SESSION + ":" + snapshot.sha256))
         self.assertNotEqual(result.import_id, old_id)
-        self.assertEqual(result.coverage["import_schema_version"], 3)
+        self.assertEqual(result.coverage["import_schema_version"], 4)
         self.assertEqual(result.import_id, self.build().import_id)
 
     def test_completed_turn_prefix_is_stable_when_later_turn_is_appended(self):
@@ -532,6 +532,48 @@ class SessionHistoryTests(unittest.TestCase):
         self.assertGreaterEqual(turn.end_time_unix_nano, self.ns(12))
         self.assert_contained(result)
 
+    # --- turn window contains every child span -----------------------------
+
+    @staticmethod
+    def at(item, millis):
+        item["timestamp"] = item["timestamp"].replace(".000Z", f".{millis:03d}Z")
+        return item
+
+    def test_closed_turn_contains_usage_and_session_events_logged_after_turn_end(self):
+        rows = self.fixture()
+        rows.append(self.at(row("usage", "usage_summary", 5, turnId="turn-1", status="ok"), 35))
+        rows.append(self.at(row("event", "session_event", 5, turnId="turn-1", category="x"), 40))
+        self.write(rows)
+        result = self.build()
+        (turn,) = self.kinds(result, "turn")
+        self.assertEqual(turn.end_time_unix_nano, self.ns(5) + 40_000_000)
+        self.assert_contained(result)
+
+    def test_open_turn_follows_its_latest_step_without_claiming_completion(self):
+        rows = self.fixture()[:-1]
+        rows.append(row("hook", "ContextualHookInvoked", 20, turnId="turn-1", name="late", status="completed"))
+        rows.append(row("call2", "tool_call", 30, turnId="turn-1", toolCallId="tool-2", toolName="x", title="Late", args={}))
+        rows.append(row("result2", "tool_result", 31, turnId="turn-1", toolCallId="tool-2", content="ok", success=True))
+        self.write(rows)
+        result = self.build()
+        (turn,) = self.kinds(result, "turn")
+        self.assertEqual((turn.start_time_unix_nano, turn.end_time_unix_nano), (self.ns(1), self.ns(31)))
+        self.assertEqual(attrs(turn)["sessionlog.timing"], "source point; incomplete turn")
+        self.assertIn("open_turn", result.gaps)
+        self.assertFalse(result.coverage["complete"])
+        self.assert_contained(result)
+
+    def test_open_turn_with_running_sub_agent_and_late_steps_has_no_violations(self):
+        rows = self.sub_fixture(complete=False)[:-1]
+        rows.append(row("late-say", "assistant", 40, turnId="turn-1", operationType="Say", content="late"))
+        self.write(rows)
+        self.write_sub(self.sub_rows())
+        result = self.build()
+        (turn,) = self.kinds(result, "turn")
+        self.assertEqual(turn.end_time_unix_nano, self.ns(40))
+        self.assert_contained(result)
+        (root,) = self.kinds(result, "session")
+        self.assertGreaterEqual(root.end_time_unix_nano, turn.end_time_unix_nano)
 
     # --- turn boundary cuts sub-execution rows ------------------------------
 

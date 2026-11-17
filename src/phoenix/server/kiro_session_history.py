@@ -19,7 +19,7 @@ from uuid import NAMESPACE_URL, uuid5
 from opentelemetry.proto.collector.trace.v1.trace_service_pb2 import ExportTraceServiceRequest
 
 PROJECT = "kiro-session-history"
-IMPORT_SCHEMA_VERSION = 3
+IMPORT_SCHEMA_VERSION = 4
 MAX_BYTES = 32 * 1024 * 1024
 MAX_ROWS = 50_000
 MAX_ROW_BYTES = 1024 * 1024
@@ -346,9 +346,14 @@ def _turn_windows(
     turns: dict[str, dict[str, Any]],
     subs: dict[str, dict[str, Any]],
     sub_windows: dict[str, tuple[int, int]],
+    steps: list[dict[str, Any]],
     gaps: set[str],
 ) -> dict[str, tuple[int, int, bool]]:
-    """Window of each turn span (start, end, observed), widened to hold its sub-agent spans."""
+    """Window of each turn span (start, end, observed), widened to hold its steps and sub-agent spans."""
+    step_times: dict[str, list[int]] = {}
+    for step in steps:
+        if step["run"] is None and step["turn_id"] in turns:
+            step_times.setdefault(step["turn_id"], []).append(step["record"]["source_ns"])
     windows = {}
     for turn_id, boundary in turns.items():
         start, end = boundary["start"], boundary["end"]
@@ -361,6 +366,8 @@ def _turn_windows(
         if finish < begin:
             gaps.add("invalid_turn_interval")
             finish = begin
+        children = step_times.get(turn_id, [])
+        begin, finish = min([begin, *children]), max([finish, *children])
         for sub_id, entry in subs.items():
             if entry.get("turn_id") == turn_id:
                 begin, finish = min(begin, sub_windows[sub_id][0]), max(finish, sub_windows[sub_id][1])
@@ -522,7 +529,7 @@ def build_import(snapshot: SessionSnapshot) -> SessionImport:
         return span_id
 
     sub_windows = _sub_agent_windows(subs, steps, gaps)
-    turn_windows = _turn_windows(turns, subs, sub_windows, gaps)
+    turn_windows = _turn_windows(turns, subs, sub_windows, steps, gaps)
     visible_times = [item["record"]["source_ns"] for item in steps]
     for window in (*sub_windows.values(), *(w[:2] for w in turn_windows.values())):
         visible_times.extend(window)
