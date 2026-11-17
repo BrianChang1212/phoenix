@@ -200,7 +200,7 @@ class SessionHistoryTests(unittest.TestCase):
         result = history.build_import(snapshot)
         old_id = str(uuid5(NAMESPACE_URL, "kiro-session-history:" + SESSION + ":" + snapshot.sha256))
         self.assertNotEqual(result.import_id, old_id)
-        self.assertEqual(result.coverage["import_schema_version"], 4)
+        self.assertEqual(result.coverage["import_schema_version"], 5)
         self.assertEqual(result.import_id, self.build().import_id)
 
     def test_completed_turn_prefix_is_stable_when_later_turn_is_appended(self):
@@ -272,13 +272,23 @@ class SessionHistoryTests(unittest.TestCase):
     def kinds(self, result, kind):
         return [s for s in self.spans(result) if attrs(s).get("sessionlog.kind") == kind]
 
+    def test_sub_agent_span_name_stays_short_when_the_agent_name_is_huge(self):
+        rows = self.sub_fixture()
+        for item in rows:
+            if item["payload"].get("type") == "sub_agent_start":
+                item["payload"]["subAgentName"] = "x" * 5000
+        self.write(rows)
+        self.write_sub(self.sub_rows())
+        (agent,) = self.kinds(self.build(), "sub_agent")
+        self.assertTrue(agent.name.startswith("Sub-agent: xxx"))
+        self.assertLessEqual(len(agent.name), 80)
     def test_paired_sub_agent_becomes_one_span_under_its_turn(self):
         self.write(self.sub_fixture())
         self.write_sub(self.sub_rows())
         result = self.build()
         (agent,) = self.kinds(result, "sub_agent")
         (turn,) = self.kinds(result, "turn")
-        self.assertEqual(agent.name, "kiro.sub_agent")
+        self.assertEqual(agent.name, "Sub-agent: reviewer")
         self.assertEqual(agent.parent_span_id, turn.span_id)
         self.assertLess(agent.start_time_unix_nano, agent.end_time_unix_nano)
         values = attrs(agent)

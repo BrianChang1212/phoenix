@@ -19,7 +19,7 @@ from uuid import NAMESPACE_URL, uuid5
 from opentelemetry.proto.collector.trace.v1.trace_service_pb2 import ExportTraceServiceRequest
 
 PROJECT = "kiro-session-history"
-IMPORT_SCHEMA_VERSION = 4
+IMPORT_SCHEMA_VERSION = 5
 MAX_BYTES = 32 * 1024 * 1024
 MAX_ROWS = 50_000
 MAX_ROW_BYTES = 1024 * 1024
@@ -553,7 +553,7 @@ def build_import(snapshot: SessionSnapshot) -> SessionImport:
         attributes, result = _sub_agent_attributes(sub_id, entry, gaps)
         begin, finish = sub_windows[sub_id]
         sub_parents[sub_id] = add_span(
-            "subagent:" + json.dumps(sub_id), "kiro.sub_agent", begin, finish, attributes,
+            "subagent:" + json.dumps(sub_id), ("Sub-agent: " + attributes.get("kiro.sub_agent.name", "unknown"))[:80], begin, finish, attributes,
             turn_parents.get(entry.get("turn_id"), root_id), result,
         )
 
