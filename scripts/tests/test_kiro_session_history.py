@@ -341,7 +341,7 @@ class SessionHistoryTests(unittest.TestCase):
         result = self.build()
         self.assertIn("unpaired_sub_agent", result.gaps)
         (agent,) = self.kinds(result, "sub_agent")
-        self.assertEqual(agent.start_time_unix_nano, agent.end_time_unix_nano)
+        self.assertEqual(agent.end_time_unix_nano, self.ns(5))  # latest child step; no complete record
         self.assertEqual(attrs(agent)["kiro.result"], "incomplete")
         self.assertEqual(agent.status.code, 0)
         self.assertNotIn("output.value", attrs(agent))
@@ -473,6 +473,65 @@ class SessionHistoryTests(unittest.TestCase):
         history.MAX_SPANS = 5
         with self.assertRaises(ValueError):
             self.build()
+
+
+    # --- time containment ------------------------------------------------
+
+    @staticmethod
+    def ns(second):
+        from datetime import datetime, timezone
+
+        return int(datetime(2026, 11, 15, 18, 0, second, tzinfo=timezone.utc).timestamp()) * 1_000_000_000
+
+    def assert_contained(self, result):
+        by_id = {s.span_id: s for s in self.spans(result)}
+        for span in by_id.values():
+            if not span.parent_span_id:
+                continue
+            parent = by_id[span.parent_span_id]
+            kind = attrs(span)["sessionlog.kind"]
+            self.assertLessEqual(parent.start_time_unix_nano, span.start_time_unix_nano, kind)
+            self.assertGreaterEqual(parent.end_time_unix_nano, span.end_time_unix_nano, kind)
+
+    def test_sub_agent_span_contains_children_outside_its_start_and_complete(self):
+        self.write(self.sub_fixture())
+        extra = {"subExecutionId": SUB, "executionId": "sub-exec-1"}
+        self.write_sub([
+            row("early", "assistant", 0, operationType="Say", content="early", **extra),
+            row("late", "assistant", 9, operationType="Say", content="late", **extra),
+        ])
+        result = self.build()
+        (agent,) = self.kinds(result, "sub_agent")
+        (turn,) = self.kinds(result, "turn")
+        self.assertEqual((agent.start_time_unix_nano, agent.end_time_unix_nano), (self.ns(0), self.ns(9)))
+        self.assertEqual((turn.start_time_unix_nano, turn.end_time_unix_nano), (self.ns(0), self.ns(9)))
+        children = sorted(s.start_time_unix_nano for s in self.spans(result) if s.parent_span_id == agent.span_id)
+        self.assertEqual(children, [self.ns(0), self.ns(9)])
+        self.assert_contained(result)
+
+    def test_running_sub_agent_ends_at_its_latest_child(self):
+        self.write(self.sub_fixture(complete=False))
+        self.write_sub(self.sub_rows())
+        result = self.build()
+        (agent,) = self.kinds(result, "sub_agent")
+        self.assertEqual((agent.start_time_unix_nano, agent.end_time_unix_nano), (self.ns(2), self.ns(5)))
+        self.assertEqual(attrs(agent)["kiro.result"], "incomplete")
+        self.assert_contained(result)
+
+    def test_running_sub_agent_without_children_stays_a_point(self):
+        self.write(self.sub_fixture(complete=False))
+        result = self.build()
+        (agent,) = self.kinds(result, "sub_agent")
+        self.assertEqual(agent.start_time_unix_nano, agent.end_time_unix_nano)
+        self.assert_contained(result)
+
+    def test_unfinished_turn_and_envelope_contain_late_sub_agent_children(self):
+        self.write(self.sub_fixture()[:-1])
+        self.write_sub([row("late", "assistant", 12, operationType="Say", content="late", subExecutionId=SUB)])
+        result = self.build()
+        (turn,) = self.kinds(result, "turn")
+        self.assertGreaterEqual(turn.end_time_unix_nano, self.ns(12))
+        self.assert_contained(result)
 
 
 if __name__ == "__main__":

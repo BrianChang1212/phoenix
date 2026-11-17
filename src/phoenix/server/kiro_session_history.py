@@ -285,6 +285,82 @@ def _clean_text(value: object, gaps: set[str]) -> str:
     return value
 
 
+def _sub_agent_windows(
+    subs: dict[str, dict[str, Any]], steps: list[dict[str, Any]], gaps: set[str]
+) -> dict[str, tuple[int, int]]:
+    """Window of each sub-agent span: its start/complete records widened to hold every child step."""
+    child_times: dict[str, list[int]] = {}
+    for step in steps:
+        if step["run"] is not None:
+            child_times.setdefault(step["run"], []).append(step["record"]["source_ns"])
+    windows = {}
+    for sub_id, entry in subs.items():
+        opened = entry.get("start") or entry["complete"]
+        closed = entry.get("complete") or opened
+        begin, finish = opened["source_ns"], closed["source_ns"]
+        if finish < begin:
+            gaps.add("invalid_sub_agent_interval")
+            finish = begin
+        children = child_times.get(sub_id, [])
+        windows[sub_id] = (min([begin, *children]), max([finish, *children]))
+    return windows
+
+
+def _turn_windows(
+    turns: dict[str, dict[str, Any]],
+    subs: dict[str, dict[str, Any]],
+    sub_windows: dict[str, tuple[int, int]],
+    gaps: set[str],
+) -> dict[str, tuple[int, int, bool]]:
+    """Window of each turn span (start, end, observed), widened to hold its sub-agent spans."""
+    windows = {}
+    for turn_id, boundary in turns.items():
+        start, end = boundary["start"], boundary["end"]
+        if end is None:
+            gaps.add("open_turn")
+        observed = start["payload"].get("boundarySource") == "observed" and end is not None and end["payload"].get("boundarySource") == "observed"
+        if not observed:
+            gaps.add("unverified_turn_boundary")
+        begin, finish = start["source_ns"], end["source_ns"] if observed else start["source_ns"]
+        if finish < begin:
+            gaps.add("invalid_turn_interval")
+            finish = begin
+        for sub_id, entry in subs.items():
+            if entry.get("turn_id") == turn_id:
+                begin, finish = min(begin, sub_windows[sub_id][0]), max(finish, sub_windows[sub_id][1])
+        windows[turn_id] = (begin, finish, observed)
+    return windows
+
+
+def _sub_agent_attributes(sub_id: str, entry: dict[str, Any], gaps: set[str]) -> tuple[dict[str, str], str]:
+    """Span attributes and the result label of one sub-agent run."""
+    source = [entry[slot] for slot in ("start", "complete") if slot in entry]
+    start_record, complete_record = entry.get("start"), entry.get("complete")
+    info = (start_record or complete_record)["payload"]
+    raw_status = str(complete_record["payload"].get("status", "unknown")) if complete_record else "incomplete"
+    result = "success" if raw_status == "success" else "incomplete" if not complete_record else "unknown" if raw_status == "unknown" else "error"
+    attributes = {
+        "sessionlog.kind": "sub_agent", "sessionlog.sub_session_id": sub_id,
+        "sessionlog.source_record_ids": json.dumps([r["id"] for r in source]),
+        "sessionlog.source_lines": json.dumps([r["source_line"] for r in source]),
+        "sessionlog.source_timestamps": json.dumps([r["timestamp"] for r in source]),
+        "sessionlog.timing": "observed sub-agent start and complete records" if complete_record and start_record else "source point; incomplete sub-agent",
+        "openinference.span.kind": "AGENT",
+        "kiro.sub_agent.name": _clean_text(info.get("subAgentName", "unknown"), gaps),
+        "kiro.sub_agent.status": _clean_text(raw_status, gaps),
+        "kiro.result": result,
+    }
+    for key, field, source_payload in (
+        ("kiro.sub_agent.explanation", "explanation", info),
+        ("input.value", "prompt", info),
+        ("output.value", "response", complete_record["payload"] if complete_record else {}),
+    ):
+        if field in source_payload:
+            attributes[key] = _clean_text(source_payload[field], gaps)
+    attributes["kiro.action_summary"] = _clean_text("Sub-agent: " + str(info.get("subAgentName", "unknown")), gaps)
+    return attributes, result
+
+
 def build_import(snapshot: SessionSnapshot) -> SessionImport:
     import_id = str(uuid5(NAMESPACE_URL, f"kiro-session-history:v{IMPORT_SCHEMA_VERSION}:" + snapshot.session_id + ":" + snapshot.sha256))
     trace_id = uuid5(NAMESPACE_URL, import_id + ":trace").bytes
@@ -409,16 +485,10 @@ def build_import(snapshot: SessionSnapshot) -> SessionImport:
         span.status.code = 1 if status == "success" else 2 if status in ("error", "denied", "timeout") else 0
         return span_id
 
+    sub_windows = _sub_agent_windows(subs, steps, gaps)
+    turn_windows = _turn_windows(turns, subs, sub_windows, gaps)
     visible_times = [item["record"]["source_ns"] for item in steps]
-    sub_windows: dict[str, tuple[int, int]] = {}
-    for sub_id, entry in subs.items():
-        opened = entry.get("start") or entry["complete"]
-        closed = entry.get("complete") or opened
-        window = (opened["source_ns"], closed["source_ns"])
-        if window[1] < window[0]:
-            gaps.add("invalid_sub_agent_interval")
-            window = (window[0], window[0])
-        sub_windows[sub_id] = window
+    for window in (*sub_windows.values(), *(w[:2] for w in turn_windows.values())):
         visible_times.extend(window)
     if not visible_times:
         raise ValueError("Kiro transcript has no supported visible steps")
@@ -428,18 +498,8 @@ def build_import(snapshot: SessionSnapshot) -> SessionImport:
         "openinference.span.kind": "CHAIN",
     })
     turn_parents = {}
-    for turn_id, boundary in turns.items():
-        start, end = boundary["start"], boundary["end"]
-        if end is None:
-            gaps.add("open_turn")
-        observed = start["payload"].get("boundarySource") == "observed" and end is not None and end["payload"].get("boundarySource") == "observed"
-        if not observed:
-            gaps.add("unverified_turn_boundary")
-        end_ns = end["source_ns"] if observed else start["source_ns"]
-        if end_ns < start["source_ns"]:
-            gaps.add("invalid_turn_interval")
-            end_ns = start["source_ns"]
-        turn_parents[turn_id] = add_span("turn:" + turn_id, "Kiro turn", start["source_ns"], end_ns, {
+    for turn_id, (begin, finish, observed) in turn_windows.items():
+        turn_parents[turn_id] = add_span("turn:" + turn_id, "Kiro turn", begin, finish, {
             "sessionlog.kind": "turn", "sessionlog.turn_id": turn_id,
             "sessionlog.timing": "observed turn boundaries" if observed else "source point; incomplete turn",
             "openinference.span.kind": "CHAIN",
@@ -447,31 +507,8 @@ def build_import(snapshot: SessionSnapshot) -> SessionImport:
 
     sub_parents: dict[str, bytes] = {}
     for sub_id, entry in sorted(subs.items()):
-        source = [entry[slot] for slot in ("start", "complete") if slot in entry]
-        start_record, complete_record = entry.get("start"), entry.get("complete")
+        attributes, result = _sub_agent_attributes(sub_id, entry, gaps)
         begin, finish = sub_windows[sub_id]
-        info = (start_record or complete_record)["payload"]
-        raw_status = str(complete_record["payload"].get("status", "unknown")) if complete_record else "incomplete"
-        result = "success" if raw_status == "success" else "incomplete" if not complete_record else "unknown" if raw_status == "unknown" else "error"
-        attributes = {
-            "sessionlog.kind": "sub_agent", "sessionlog.sub_session_id": sub_id,
-            "sessionlog.source_record_ids": json.dumps([r["id"] for r in source]),
-            "sessionlog.source_lines": json.dumps([r["source_line"] for r in source]),
-            "sessionlog.source_timestamps": json.dumps([r["timestamp"] for r in source]),
-            "sessionlog.timing": "observed sub-agent start and complete records" if complete_record and start_record else "source point; incomplete sub-agent",
-            "openinference.span.kind": "AGENT",
-            "kiro.sub_agent.name": _clean_text(info.get("subAgentName", "unknown"), gaps),
-            "kiro.sub_agent.status": _clean_text(raw_status, gaps),
-            "kiro.result": result,
-        }
-        for key, field, source_payload in (
-            ("kiro.sub_agent.explanation", "explanation", info),
-            ("input.value", "prompt", info),
-            ("output.value", "response", complete_record["payload"] if complete_record else {}),
-        ):
-            if field in source_payload:
-                attributes[key] = _clean_text(source_payload[field], gaps)
-        attributes["kiro.action_summary"] = _clean_text("Sub-agent: " + str(info.get("subAgentName", "unknown")), gaps)
         sub_parents[sub_id] = add_span(
             "subagent:" + json.dumps(sub_id), "kiro.sub_agent", begin, finish, attributes,
             turn_parents.get(entry.get("turn_id"), root_id), result,
