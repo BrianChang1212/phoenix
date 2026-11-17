@@ -51,7 +51,8 @@ class SessionSnapshot:
     gaps: tuple[str, ...]
     row_count: int
     through_record_id: str
-    # (subSessionId, valid rows of its sub-executions file), sorted by id.
+    # (subSessionId, parsed records of its sub-executions file), sorted by id. Rows that
+    # are malformed, undatable, or later than a turn boundary are not included.
     sub_runs: tuple[tuple[str, tuple[dict[str, Any], ...]], ...] = ()
 
 
@@ -193,10 +194,10 @@ def load_snapshot(
                 sub_raw = _read_bounded(
                     transcript.parent / "sub-executions" / (sub_id + ".jsonl"), root, MAX_BYTES - used_bytes
                 )
-            except SourceLimitError:
-                raise
-            except (OSError, ValueError):
+            except FileNotFoundError:
                 sub_raw = None
+            except OSError as error:
+                raise ValueError("Kiro sub-execution source cannot be read safely") from error
         if sub_raw is None:
             gaps.add("sub_execution_missing")
             digest.update(b"<missing>")

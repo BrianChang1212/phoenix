@@ -385,9 +385,8 @@ class SessionHistoryTests(unittest.TestCase):
             os.symlink(outside, self.directory / "sub-executions" / f"{SUB}.jsonl")
         except OSError:
             self.skipTest("Symlinks are unavailable on this host")
-        result = self.build()
-        self.assertIn("sub_execution_missing", result.gaps)
-        self.assertEqual([s for s in self.spans(result) if attrs(s).get("sessionlog.kind") == "tool"], [])
+        with self.assertRaises(ValueError):
+            self.build()
 
     def test_sub_execution_malformed_rows_use_existing_gap_semantics(self):
         self.write(self.sub_fixture())
@@ -567,6 +566,107 @@ class SessionHistoryTests(unittest.TestCase):
         second = history.load_snapshot(SESSION, sessions_root=self.root, through_turn_id="turn-1")
         self.assertEqual(first.sha256, second.sha256)
         self.assertEqual(first.gaps, second.gaps)
+
+
+    # --- fail-closed sub-execution loading ---------------------------------
+
+    def test_symlinked_sub_execution_directory_is_refused(self):
+        self.write(self.sub_fixture())
+        elsewhere = self.root / "elsewhere"
+        elsewhere.mkdir()
+        (elsewhere / f"{SUB}.jsonl").write_text("".join(json.dumps(item) + "\n" for item in self.sub_rows()), encoding="utf-8")
+        try:
+            os.symlink(elsewhere, self.directory / "sub-executions", target_is_directory=True)
+        except OSError:
+            self.skipTest("Symlinks are unavailable on this host")
+        with self.assertRaises(ValueError):
+            self.build()
+
+    def test_non_regular_sub_execution_path_is_refused(self):
+        self.write(self.sub_fixture())
+        (self.directory / "sub-executions" / f"{SUB}.jsonl").mkdir(parents=True)
+        with self.assertRaises(ValueError):
+            self.build()
+
+    def test_sub_execution_that_changes_while_read_is_refused(self):
+        self.write(self.sub_fixture())
+        self.write_sub(self.sub_rows())
+        original = history._read_bounded
+
+        def changed(path, root, limit):
+            if path.parent.name == "sub-executions":
+                raise ValueError("Kiro source changed while taking its snapshot")
+            return original(path, root, limit)
+
+        history._read_bounded = changed
+        self.addCleanup(setattr, history, "_read_bounded", original)
+        with self.assertRaises(ValueError):
+            self.build()
+
+    def test_oversize_sub_execution_file_raises_the_source_limit_error(self):
+        self.write(self.sub_fixture())
+        self.write_sub(self.sub_rows())
+        original = history.MAX_BYTES
+        self.addCleanup(setattr, history, "MAX_BYTES", original)
+        history.MAX_BYTES = (self.directory / "messages.jsonl").stat().st_size + 10
+        with self.assertRaises(history.SourceLimitError):
+            self.build()
+
+    # --- reviewer-listed edge cases -----------------------------------------
+
+    def test_duplicate_sub_session_id_in_two_starts_keeps_the_first(self):
+        rows = self.sub_fixture()
+        rows.insert(3, row("sa-start-2", "sub_agent_start", 3, parentExecutionId="turn-1", subSessionId=SUB, subAgentName="duplicate", prompt="DUP_PROMPT"))
+        self.write(rows)
+        self.write_sub(self.sub_rows())
+        result = self.build()
+        (agent,) = self.kinds(result, "sub_agent")
+        self.assertEqual(attrs(agent)["kiro.sub_agent.name"], "reviewer")
+        self.assertEqual(json.loads(attrs(agent)["sessionlog.source_record_ids"]), ["sa-start", "sa-done"])
+        self.assertIn("unpaired_sub_agent", result.gaps)
+        self.assertNotIn(b"DUP_PROMPT", result.request.SerializeToString())
+
+    def test_nested_sub_agent_records_inside_a_sub_file_stay_an_unknown_gap(self):
+        self.write(self.sub_fixture())
+        self.write_sub(self.sub_rows() + [
+            row("n-start", "sub_agent_start", 5, subExecutionId=SUB, subSessionId=SUB2, subAgentName="nested", prompt="NESTED_PROMPT"),
+        ])
+        result = self.build()
+        self.assertEqual(len(self.kinds(result, "sub_agent")), 1)
+        self.assertIn("unknown_event_type", result.gaps)
+        self.assertNotIn(b"NESTED_PROMPT", result.request.SerializeToString())
+
+    def test_main_and_sub_rows_with_identical_timestamps_keep_a_stable_order(self):
+        rows = self.sub_fixture()
+        rows.insert(3, row("m-say", "assistant", 4, turnId="turn-1", operationType="Say", content="main reply"))
+        self.write(rows)
+        self.write_sub(self.sub_rows())
+        first, second = self.build(), self.build()
+        self.assertEqual(first.request.SerializeToString(), second.request.SerializeToString())
+        at_four = sorted(
+            (s for s in self.spans(first) if s.start_time_unix_nano == self.ns(4) and attrs(s)["sessionlog.kind"] in ("assistant", "tool")),
+            key=lambda s: int(attrs(s)["sessionlog.order"]),
+        )
+        self.assertEqual([json.loads(attrs(s)["sessionlog.source_record_ids"])[0] for s in at_four], ["m-say", "s-call"])
+
+
+    def test_junctioned_sub_execution_directory_is_refused(self):
+        if os.name != "nt":
+            self.skipTest("Junctions exist only on Windows")
+        import subprocess
+
+        self.write(self.sub_fixture())
+        elsewhere = self.root / "elsewhere"
+        elsewhere.mkdir()
+        (elsewhere / f"{SUB}.jsonl").write_text("".join(json.dumps(item) + "\n" for item in self.sub_rows()), encoding="utf-8")
+        made = subprocess.run(
+            ["cmd", "/c", "mklink", "/J", str(self.directory / "sub-executions"), str(elsewhere)],
+            capture_output=True,
+        )
+        if made.returncode != 0:
+            self.skipTest("Junctions are unavailable on this host")
+        with self.assertRaises(ValueError):
+            self.build()
 
 
 if __name__ == "__main__":
