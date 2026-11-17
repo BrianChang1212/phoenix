@@ -86,6 +86,25 @@ class KiroSessionImportAPITests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(ingest.await_args.kwargs["recording_enabled"])
         self.assertEqual(settle.await_args.kwargs["project_name"], "kiro-session-history")
 
+    async def test_large_import_gets_a_readback_deadline_that_scales_with_its_span_count(self):
+        keys = frozenset((f"{i:016x}", f"{i:016x}") for i in range(2535))
+        imported = SimpleNamespace(
+            import_id=str(uuid4()), request=object(), expected_span_keys=keys,
+            coverage={"logical_steps": 1}, gaps=(), through_record_id="last-record",
+        )
+        readback = SimpleNamespace(
+            storage="verified", persisted_span_keys=keys,
+            project_relay_id="Project:1", session_relay_id="Session:1",
+        )
+        with patch("phoenix.server.kiro_session_history.load_snapshot", return_value=SimpleNamespace(sha256="a" * 64)), \
+             patch("phoenix.server.kiro_session_history.build_import", return_value=imported), \
+             patch("phoenix.server.api.routers.v1.traces._add_spans", new_callable=AsyncMock), \
+             patch("phoenix.server.recording_readback.settle_recording_spans", new_callable=AsyncMock, return_value=readback) as settle:
+            response = await self.client.post("/v1/recordings/kiro-session/import", json=self.body)
+        self.assertEqual(response.status_code, 200)
+        # Ingestion runs near 160 spans/s here: a fixed 5 s window verified only ~800 of 2535 spans.
+        self.assertGreaterEqual(settle.await_args.kwargs["timeout_sec"], 20.0)
+        self.assertLessEqual(settle.await_args.kwargs["timeout_sec"], 60.0)
     async def test_partial_storage_never_claims_complete_import(self):
         imported = SimpleNamespace(
             import_id=str(uuid4()), request=object(), expected_span_keys=frozenset({("aa", "bb")}),

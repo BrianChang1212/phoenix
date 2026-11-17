@@ -133,6 +133,8 @@ async def import_kiro_session(body: ImportKiroSession, request: Request) -> dict
         readback = await settle_recording_spans(
             request.app.state.db, capture_id=imported.import_id,
             expected_span_keys=imported.expected_span_keys, project_name=PROJECT,
+            # Ingestion runs near 160 spans/s, so the readback window grows with the import instead of a fixed 5 s.
+            timeout_sec=min(60.0, 5.0 + len(imported.expected_span_keys) / 100),
         )
     except (OSError, RuntimeError, TimeoutError):
         readback = None
