@@ -19,7 +19,7 @@ from uuid import NAMESPACE_URL, uuid5
 from opentelemetry.proto.collector.trace.v1.trace_service_pb2 import ExportTraceServiceRequest
 
 PROJECT = "kiro-session-history"
-IMPORT_SCHEMA_VERSION = 2
+IMPORT_SCHEMA_VERSION = 3
 MAX_BYTES = 32 * 1024 * 1024
 MAX_ROWS = 50_000
 MAX_ROW_BYTES = 1024 * 1024
@@ -34,6 +34,12 @@ VISIBLE_TYPES = frozenset({
 EXCLUDED_TYPES = frozenset({
     "agent_note", "session_start", "steering_inclusion", "session_metadata",
 })
+SUB_AGENT_TYPES = frozenset({"sub_agent_start", "sub_agent_complete"})
+SUB_SESSION_ID = re.compile(r"[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}")
+
+
+class SourceLimitError(ValueError):
+    """A Kiro source exceeds its byte, row, or size limit."""
 
 
 @dataclass(frozen=True)
@@ -45,6 +51,8 @@ class SessionSnapshot:
     gaps: tuple[str, ...]
     row_count: int
     through_record_id: str
+    # (subSessionId, valid rows of its sub-executions file), sorted by id.
+    sub_runs: tuple[tuple[str, tuple[dict[str, Any], ...]], ...] = ()
 
 
 @dataclass(frozen=True)
@@ -87,7 +95,7 @@ def _read_bounded(path: Path, root: Path, limit: int) -> bytes:
     if (opened.st_size, opened.st_mtime_ns) != (after.st_size, after.st_mtime_ns):
         raise ValueError("Kiro source changed while taking its snapshot")
     if len(raw) > limit:
-        raise ValueError("Kiro source exceeds its byte limit")
+        raise SourceLimitError("Kiro source exceeds its byte limit")
     return raw
 
 
@@ -157,13 +165,60 @@ def load_snapshot(
         lines = lines[:boundary]
         raw = b"".join(lines)
     if len(lines) > MAX_ROWS:
-        raise ValueError("Kiro transcript exceeds its row limit")
-    records = []
+        raise SourceLimitError("Kiro transcript exceeds its row limit")
     gaps: set[str] = set()
+    records = _parse_rows(lines, gaps)
+    if not records:
+        raise ValueError("Kiro transcript has no valid timestamped records")
+    digest = hashlib.sha256(raw)
+    row_count = len(lines)
+    sub_runs = []
+    sub_ids = sorted({
+        r["payload"]["subSessionId"] for r in records
+        if r["payload"].get("type") in SUB_AGENT_TYPES and isinstance(r["payload"].get("subSessionId"), str)
+    })
+    used_bytes = len(raw)
+    if used_bytes > MAX_BYTES:
+        raise SourceLimitError("Kiro source exceeds its byte limit")
+    for sub_id in sub_ids:
+        digest.update(b"\nsub-execution:" + sub_id.encode("utf-8") + b"\n")
+        sub_raw = None
+        if SUB_SESSION_ID.fullmatch(sub_id):
+            try:
+                sub_raw = _read_bounded(
+                    transcript.parent / "sub-executions" / (sub_id + ".jsonl"), root, MAX_BYTES - used_bytes
+                )
+            except SourceLimitError:
+                raise
+            except (OSError, ValueError):
+                sub_raw = None
+        if sub_raw is None:
+            gaps.add("sub_execution_missing")
+            digest.update(b"<missing>")
+            continue
+        used_bytes += len(sub_raw)
+        digest.update(sub_raw)
+        sub_lines = sub_raw.splitlines(keepends=True)
+        row_count += len(sub_lines)
+        if row_count > MAX_ROWS:
+            raise SourceLimitError("Kiro transcript exceeds its row limit")
+        sub_runs.append((sub_id, tuple(_parse_rows(sub_lines, gaps, sub_id))))
+    title = metadata.get("title")
+    return SessionSnapshot(
+        session_id=session_id,
+        title=title[:200] if isinstance(title, str) else session_id,
+        sha256=digest.hexdigest(),
+        records=tuple(records), gaps=tuple(sorted(gaps)), row_count=row_count,
+        through_record_id=records[-1]["id"], sub_runs=tuple(sub_runs),
+    )
+
+
+def _parse_rows(lines: list[bytes], gaps: set[str], sub_id: Optional[str] = None) -> list[dict[str, Any]]:
+    records = []
     seen = {}
     for index, line in enumerate(lines, 1):
         if len(line) > MAX_ROW_BYTES:
-            raise ValueError("Kiro transcript row exceeds its byte limit")
+            raise SourceLimitError("Kiro transcript row exceeds its byte limit")
         if not line.endswith(b"\n"):
             gaps.add("unfinished_row")
             continue
@@ -174,6 +229,8 @@ def load_snapshot(
             ident = record.get("id")
             if not isinstance(ident, str) or not 0 < len(ident) <= 512:
                 raise ValueError("Invalid transcript record ID")
+            if sub_id is not None and record["payload"].get("subExecutionId", sub_id) != sub_id:
+                raise ValueError("Sub-execution row belongs to another run")
         except (ValueError, UnicodeDecodeError):
             gaps.add("malformed_row")
             continue
@@ -190,16 +247,7 @@ def load_snapshot(
             gaps.add("invalid_timestamp")
             continue
         records.append(record)
-    if not records:
-        raise ValueError("Kiro transcript has no valid timestamped records")
-    title = metadata.get("title")
-    return SessionSnapshot(
-        session_id=session_id,
-        title=title[:200] if isinstance(title, str) else session_id,
-        sha256=hashlib.sha256(raw).hexdigest(),
-        records=tuple(records), gaps=tuple(sorted(gaps)), row_count=len(lines),
-        through_record_id=records[-1]["id"],
-    )
+    return records
 
 
 def _redact_structure(value: object) -> object:
@@ -250,71 +298,100 @@ def build_import(snapshot: SessionSnapshot) -> SessionImport:
     excluded: Counter[str] = Counter()
     included: Counter[str] = Counter()
     steps = []
-    calls: dict[str, dict[str, Any]] = {}
-    results: dict[str, dict[str, Any]] = {}
+    subs: dict[str, dict[str, Any]] = {}
     turns: dict[str, dict[str, Any]] = {}
-    current_turn = None
+    tool_steps = 0
 
-    for record in snapshot.records:
-        payload = record["payload"]
-        kind = payload.get("type")
-        if kind in EXCLUDED_TYPES or kind == "assistant" and payload.get("operationType") != "Say":
-            excluded[str(kind) + ("." + str(payload.get("operationType")) if kind == "assistant" else "")] += 1
-            if kind == "assistant" and payload.get("operationType") != "Reasoning":
-                gaps.add("unsupported_assistant_operation")
-            continue
-        if kind not in VISIBLE_TYPES:
-            excluded[str(kind)] += 1
-            gaps.add("unknown_event_type")
-            continue
-        included[kind] += 1
-        turn_id = payload.get("turnId")
-        if kind == "turn_start":
-            turn_id = turn_id or payload.get("executionId")
-            if not isinstance(turn_id, str) or not turn_id:
-                gaps.add("missing_turn_id")
-            else:
-                if turn_id in turns:
-                    gaps.add("duplicate_turn_start")
-                turns[turn_id] = {"start": record, "end": None}
-                current_turn = turn_id
-        if not isinstance(turn_id, str) or not turn_id:
-            turn_id = current_turn
-        step = {"record": record, "records": [record], "kind": kind, "turn_id": turn_id}
-        if kind in ("tool_call", "tool_result"):
-            tool_id = payload.get("toolCallId")
-            if not isinstance(tool_id, str) or not tool_id:
-                gaps.add("missing_tool_call_id")
-                steps.append(step)
+    def ingest(records: tuple[dict[str, Any], ...], run: Optional[str] = None) -> None:
+        nonlocal tool_steps
+        calls: dict[str, dict[str, Any]] = {}
+        results: dict[str, dict[str, Any]] = {}
+        current_turn = None
+        for record in records:
+            payload = record["payload"]
+            kind = payload.get("type")
+            if run is None and kind in SUB_AGENT_TYPES:
+                sub_id = payload.get("subSessionId")
+                if not isinstance(sub_id, str) or not sub_id:
+                    excluded[kind] += 1
+                    gaps.add("unpaired_sub_agent")
+                    continue
+                included[kind] += 1
+                entry = subs.setdefault(sub_id, {})
+                slot = "start" if kind == "sub_agent_start" else "complete"
+                if slot in entry:
+                    gaps.add("unpaired_sub_agent")
+                    continue
+                entry[slot] = record
+                parent_id = payload.get("parentExecutionId")
+                if slot == "start" or "turn_id" not in entry:
+                    entry["turn_id"] = parent_id if parent_id in turns else current_turn
                 continue
-            target = calls if kind == "tool_call" else results
-            if tool_id in target:
-                raise ValueError("Ambiguous duplicate toolCallId in transcript snapshot")
-            target[tool_id] = step
-        else:
-            steps.append(step)
-        if kind == "turn_end":
-            if turn_id not in turns:
-                gaps.add("orphan_turn_end")
+            if kind in EXCLUDED_TYPES or kind == "assistant" and payload.get("operationType") != "Say":
+                excluded[str(kind) + ("." + str(payload.get("operationType")) if kind == "assistant" else "")] += 1
+                if kind == "assistant" and payload.get("operationType") != "Reasoning":
+                    gaps.add("unsupported_assistant_operation")
+                continue
+            if kind not in VISIBLE_TYPES:
+                excluded[str(kind)] += 1
+                gaps.add("unknown_event_type")
+                continue
+            included[kind] += 1
+            turn_id = payload.get("turnId")
+            if kind == "turn_start" and run is None:
+                turn_id = turn_id or payload.get("executionId")
+                if not isinstance(turn_id, str) or not turn_id:
+                    gaps.add("missing_turn_id")
+                else:
+                    if turn_id in turns:
+                        gaps.add("duplicate_turn_start")
+                    turns[turn_id] = {"start": record, "end": None}
+                    current_turn = turn_id
+            if not isinstance(turn_id, str) or not turn_id:
+                turn_id = current_turn
+            step = {"record": record, "records": [record], "kind": kind, "turn_id": turn_id, "run": run}
+            if kind in ("tool_call", "tool_result"):
+                tool_id = payload.get("toolCallId")
+                if not isinstance(tool_id, str) or not tool_id:
+                    gaps.add("missing_tool_call_id")
+                    steps.append(step)
+                    continue
+                target = calls if kind == "tool_call" else results
+                if tool_id in target:
+                    raise ValueError("Ambiguous duplicate toolCallId in transcript snapshot")
+                target[tool_id] = step
             else:
-                turns[turn_id]["end"] = record
-            if current_turn == turn_id:
-                current_turn = None
+                steps.append(step)
+            if kind == "turn_end" and run is None:
+                if turn_id not in turns:
+                    gaps.add("orphan_turn_end")
+                else:
+                    turns[turn_id]["end"] = record
+                if current_turn == turn_id:
+                    current_turn = None
 
-    for tool_id in sorted(calls.keys() | results.keys()):
-        call, result = calls.get(tool_id), results.get(tool_id)
-        step = dict(result or call)
-        step["kind"] = "tool"
-        step["records"] = ([call["record"]] if call else []) + ([result["record"]] if result else [])
-        step["call"] = call["record"]["payload"] if call else None
-        step["result"] = result["record"]["payload"] if result else None
-        step["tool_id"] = tool_id
-        step["turn_id"] = (call or result)["turn_id"]
-        if not call:
-            gaps.add("orphan_tool_result")
-        if not result:
-            gaps.add("missing_tool_result")
-        steps.append(step)
+        for tool_id in sorted(calls.keys() | results.keys()):
+            call, result = calls.get(tool_id), results.get(tool_id)
+            step = dict(result or call)
+            step["kind"] = "tool"
+            step["records"] = ([call["record"]] if call else []) + ([result["record"]] if result else [])
+            step["call"] = call["record"]["payload"] if call else None
+            step["result"] = result["record"]["payload"] if result else None
+            step["tool_id"] = tool_id
+            step["turn_id"] = (call or result)["turn_id"]
+            if not call:
+                gaps.add("orphan_tool_result")
+            if not result:
+                gaps.add("missing_tool_result")
+            steps.append(step)
+        tool_steps += len(calls.keys() | results.keys())
+
+    ingest(snapshot.records)
+    for sub_id, sub_records in snapshot.sub_runs:
+        ingest(sub_records, sub_id)
+    for entry in subs.values():
+        if "start" not in entry or "complete" not in entry:
+            gaps.add("unpaired_sub_agent")
 
     common = {
         "session.id": import_id, "recording.capture_id": import_id,
@@ -333,6 +410,16 @@ def build_import(snapshot: SessionSnapshot) -> SessionImport:
         return span_id
 
     visible_times = [item["record"]["source_ns"] for item in steps]
+    sub_windows: dict[str, tuple[int, int]] = {}
+    for sub_id, entry in subs.items():
+        opened = entry.get("start") or entry["complete"]
+        closed = entry.get("complete") or opened
+        window = (opened["source_ns"], closed["source_ns"])
+        if window[1] < window[0]:
+            gaps.add("invalid_sub_agent_interval")
+            window = (window[0], window[0])
+        sub_windows[sub_id] = window
+        visible_times.extend(window)
     if not visible_times:
         raise ValueError("Kiro transcript has no supported visible steps")
     root_id = add_span("root", "kiro.session", min(visible_times), max(visible_times), {
@@ -358,7 +445,39 @@ def build_import(snapshot: SessionSnapshot) -> SessionImport:
             "openinference.span.kind": "CHAIN",
         }, root_id)
 
-    for ordinal, step in enumerate(sorted(steps, key=lambda s: (s["record"]["source_ns"], s["record"]["source_line"]))):
+    sub_parents: dict[str, bytes] = {}
+    for sub_id, entry in sorted(subs.items()):
+        source = [entry[slot] for slot in ("start", "complete") if slot in entry]
+        start_record, complete_record = entry.get("start"), entry.get("complete")
+        begin, finish = sub_windows[sub_id]
+        info = (start_record or complete_record)["payload"]
+        raw_status = str(complete_record["payload"].get("status", "unknown")) if complete_record else "incomplete"
+        result = "success" if raw_status == "success" else "incomplete" if not complete_record else "unknown" if raw_status == "unknown" else "error"
+        attributes = {
+            "sessionlog.kind": "sub_agent", "sessionlog.sub_session_id": sub_id,
+            "sessionlog.source_record_ids": json.dumps([r["id"] for r in source]),
+            "sessionlog.source_lines": json.dumps([r["source_line"] for r in source]),
+            "sessionlog.source_timestamps": json.dumps([r["timestamp"] for r in source]),
+            "sessionlog.timing": "observed sub-agent start and complete records" if complete_record and start_record else "source point; incomplete sub-agent",
+            "openinference.span.kind": "AGENT",
+            "kiro.sub_agent.name": _clean_text(info.get("subAgentName", "unknown"), gaps),
+            "kiro.sub_agent.status": _clean_text(raw_status, gaps),
+            "kiro.result": result,
+        }
+        for key, field, source_payload in (
+            ("kiro.sub_agent.explanation", "explanation", info),
+            ("input.value", "prompt", info),
+            ("output.value", "response", complete_record["payload"] if complete_record else {}),
+        ):
+            if field in source_payload:
+                attributes[key] = _clean_text(source_payload[field], gaps)
+        attributes["kiro.action_summary"] = _clean_text("Sub-agent: " + str(info.get("subAgentName", "unknown")), gaps)
+        sub_parents[sub_id] = add_span(
+            "subagent:" + json.dumps(sub_id), "kiro.sub_agent", begin, finish, attributes,
+            turn_parents.get(entry.get("turn_id"), root_id), result,
+        )
+
+    for ordinal, step in enumerate(sorted(steps, key=lambda s: (s["record"]["source_ns"], s["run"] or "", s["record"]["source_line"]))):
         record, kind = step["record"], step["kind"]
         payload = record["payload"]
         title = kind
@@ -422,21 +541,27 @@ def build_import(snapshot: SessionSnapshot) -> SessionImport:
         elif kind == "session_event":
             title = "Session event: " + str(payload.get("category", "unknown"))
         attributes["kiro.action_summary"] = _clean_text(title, gaps)
-        parent = turn_parents.get(step["turn_id"], root_id)
         source_key = json.dumps([r["id"] for r in step["records"]], separators=(",", ":"))
-        add_span("step:" + source_key, attributes["kiro.action_summary"], record["source_ns"], record["source_ns"], attributes, parent, status)
+        if step["run"] is None:
+            parent = turn_parents.get(step["turn_id"], root_id)
+            key = "step:" + source_key
+        else:
+            parent = sub_parents[step["run"]]
+            key = "substep:" + json.dumps([step["run"], [r["id"] for r in step["records"]]], separators=(",", ":"))
+        add_span(key, attributes["kiro.action_summary"], record["source_ns"], record["source_ns"], attributes, parent, status)
 
     if len(scope.spans) > MAX_SPANS or request.ByteSize() > MAX_REQUEST_BYTES:
         raise ValueError("Kiro Session import exceeds its span or request limit")
     coverage = {
         "import_schema_version": IMPORT_SCHEMA_VERSION,
         "source_rows": snapshot.row_count,
-        "valid_records": len(snapshot.records),
+        "valid_records": len(snapshot.records) + sum(len(rows) for _, rows in snapshot.sub_runs),
         "included_by_type": dict(sorted(included.items())),
         "excluded_by_type": dict(sorted(excluded.items())),
         "visible_steps": len(steps),
         "spans": len(scope.spans),
-        "tool_steps": len(calls.keys() | results.keys()),
+        "tool_steps": tool_steps,
+        "sub_agent_runs": len(subs),
         "complete": not gaps,
         "snapshot_sha256": snapshot.sha256,
     }
