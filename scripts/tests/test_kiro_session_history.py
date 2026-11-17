@@ -534,5 +534,40 @@ class SessionHistoryTests(unittest.TestCase):
         self.assert_contained(result)
 
 
+    # --- turn boundary cuts sub-execution rows ------------------------------
+
+    def test_rows_appended_to_a_sub_file_after_the_boundary_do_not_change_the_import(self):
+        self.write(self.sub_fixture())
+        self.write_sub(self.sub_rows())
+        first = history.load_snapshot(SESSION, sessions_root=self.root, through_turn_id="turn-1")
+        late = {"subExecutionId": SUB, "executionId": "sub-exec-1"}
+        self.write_sub(self.sub_rows() + [
+            row("s-late", "assistant", 20, operationType="Say", content="LATE_SUB_ROW", **late),
+            row("s-late-tool", "tool_call", 21, toolCallId="tool-late", toolName="fixture", **late),
+        ])
+        second = history.load_snapshot(SESSION, sessions_root=self.root, through_turn_id="turn-1")
+        self.assertEqual(first.sha256, second.sha256)
+        self.assertEqual(first.row_count, second.row_count)
+        first_import, second_import = history.build_import(first), history.build_import(second)
+        self.assertEqual(first_import.import_id, second_import.import_id)
+        self.assertEqual(first_import.request.SerializeToString(), second_import.request.SerializeToString())
+        self.assertNotIn(b"LATE_SUB_ROW", second_import.request.SerializeToString())
+        self.assertEqual(second_import.gaps, ())
+        # Without a boundary the same rows are imported and change the identity.
+        full = self.build()
+        self.assertIn(b"LATE_SUB_ROW", full.request.SerializeToString())
+        self.assertNotEqual(full.import_id, second_import.import_id)
+
+    def test_unfinished_row_appended_after_the_boundary_does_not_change_the_import(self):
+        self.write(self.sub_fixture())
+        self.write_sub(self.sub_rows())
+        first = history.load_snapshot(SESSION, sessions_root=self.root, through_turn_id="turn-1")
+        late = json.dumps(row("s-late", "assistant", 20, operationType="Say", content="x", subExecutionId=SUB))
+        self.write_sub(self.sub_rows() + [row("s-late-2", "assistant", 21, operationType="Say", content="y", subExecutionId=SUB)], suffix=late[:30])
+        second = history.load_snapshot(SESSION, sessions_root=self.root, through_turn_id="turn-1")
+        self.assertEqual(first.sha256, second.sha256)
+        self.assertEqual(first.gaps, second.gaps)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -138,6 +138,7 @@ def load_snapshot(
     transcript, metadata = matches[0]
     raw = _read_bounded(transcript, root, MAX_BYTES)
     lines = raw.splitlines(keepends=True)
+    boundary_ns: Optional[int] = None
     if through_turn_id is not None:
         if not isinstance(through_turn_id, str) or not 0 < len(through_turn_id) <= 200:
             raise ValueError("Invalid Kiro turn boundary identity")
@@ -159,6 +160,10 @@ def load_snapshot(
                 and (payload.get("turnId") or payload.get("executionId")) == through_turn_id
             ):
                 boundary = index + 1
+                try:
+                    boundary_ns = _timestamp(candidate.get("timestamp"))
+                except (ValueError, OverflowError, OSError):
+                    raise ValueError("Kiro turn boundary has no valid timestamp") from None
                 break
         if boundary is None:
             raise ValueError("Requested Kiro turn has no observed completion boundary")
@@ -197,8 +202,10 @@ def load_snapshot(
             digest.update(b"<missing>")
             continue
         used_bytes += len(sub_raw)
-        digest.update(sub_raw)
         sub_lines = sub_raw.splitlines(keepends=True)
+        if boundary_ns is not None:
+            sub_lines = _cut_after(sub_lines, boundary_ns)
+        digest.update(b"".join(sub_lines))
         row_count += len(sub_lines)
         if row_count > MAX_ROWS:
             raise SourceLimitError("Kiro transcript exceeds its row limit")
@@ -211,6 +218,34 @@ def load_snapshot(
         records=tuple(records), gaps=tuple(sorted(gaps)), row_count=row_count,
         through_record_id=records[-1]["id"], sub_runs=tuple(sub_runs),
     )
+
+
+def _row_ns(line: bytes) -> Optional[int]:
+    """Source timestamp of a complete JSON row, or None when it has none."""
+    if not line.endswith(b"\n"):
+        return None
+    try:
+        record = json.loads(line)
+        return _timestamp(record.get("timestamp")) if isinstance(record, dict) else None
+    except (ValueError, UnicodeDecodeError, OverflowError, OSError):
+        return None
+
+
+def _cut_after(lines: list[bytes], boundary_ns: int) -> list[bytes]:
+    """Drop rows stamped after the boundary, and undatable rows that follow the first such row.
+
+    Sub-execution files are append-only, so the dropped suffix is exactly what a
+    later snapshot would add; keeping the rest makes the import independent of it.
+    """
+    kept = []
+    cut = False
+    for line in lines:
+        ns = _row_ns(line)
+        if ns is not None and ns > boundary_ns:
+            cut = True
+        elif ns is not None or not cut:
+            kept.append(line)
+    return kept
 
 
 def _parse_rows(lines: list[bytes], gaps: set[str], sub_id: Optional[str] = None) -> list[dict[str, Any]]:
