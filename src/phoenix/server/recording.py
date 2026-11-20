@@ -496,8 +496,6 @@ class RecordingGate:
         self._deleted_commands = (
             self._ledger.deleted_recording_commands() if self._ledger else set()
         )
-        for project, session_id in self._deleted_history:
-            self.finish_history_deletion(project, session_id)
         self._active: dict[ConversationKey, _Capture] = {}
         self._readback_attempted = {
             capture.capture_id
@@ -515,8 +513,10 @@ class RecordingGate:
         if self.history_deleted(RECORDING_PROJECT, capture_id):
             return
         capture = self._captures.get(capture_id)
-        if capture is None or capture.storage != "verified":
-            if capture is not None and capture.state in ("recording", "draining"):
+        if capture is None:
+            return
+        if capture.storage != "verified":
+            if capture.state in ("recording", "draining"):
                 raise ValueError("Capture is still recording or draining")
             raise ValueError("Capture storage is not verified; recheck it before deletion")
         if capture.state in ("recording", "draining"):
@@ -538,6 +538,13 @@ class RecordingGate:
 
     def history_deleted(self, project: str, session_id: str) -> bool:
         return (project, session_id) in self._deleted_history
+
+    def pending_history_cleanups(self) -> tuple[tuple[str, str], ...]:
+        return tuple(
+            (project, session_id)
+            for project, session_id in self._deleted_history
+            if project == RECORDING_PROJECT and session_id in self._captures
+        )
 
     @staticmethod
     def _command_hash(owner: ConversationKey, request_id: str) -> str:
@@ -569,6 +576,8 @@ class RecordingGate:
         if self._command_hash(owner, request_id) in self._deleted_commands:
             raise ValueError("This recording request was permanently deleted")
         if previous := self._commands.get((owner, request_id)):
+            if self.history_deleted(RECORDING_PROJECT, previous.capture_id):
+                raise ValueError("This recording request was permanently deleted")
             if previous.task != task:
                 raise ValueError("Request ID was already used for another task")
             guard = self._lifetimes.get(previous.capture_id)

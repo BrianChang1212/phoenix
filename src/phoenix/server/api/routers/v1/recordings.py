@@ -115,7 +115,9 @@ async def history_deletion_capabilities(request: Request) -> dict[str, Any]:
     _gate(request)
     guard = getattr(request.app.state, "history_deletion_guard", None)
     enabled = guard is not None and guard.gate.history_deletion_persistent
-    return {"version": 1, "permanent_session_delete": enabled}
+    if enabled:
+        await guard.recover(request.app.state.db)
+    return {"version": 1, "permanent_session_delete": enabled, "stable_identity_delete": enabled}
 
 
 @router.post("/recordings/kiro-session/import")

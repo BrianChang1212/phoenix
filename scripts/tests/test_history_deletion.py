@@ -2,7 +2,7 @@ import asyncio
 import sqlite3
 import tempfile
 import unittest
-from contextlib import closing
+from contextlib import asynccontextmanager, closing
 from datetime import datetime, timezone
 from pathlib import Path
 from queue import SimpleQueue
@@ -13,7 +13,7 @@ from uuid import uuid4
 import httpx
 from fastapi import FastAPI
 from opentelemetry.proto.trace.v1.trace_pb2 import Span as OtlpSpan
-from sqlalchemy import URL, select
+from sqlalchemy import URL, delete, select
 from strawberry.relay import GlobalID
 from test_recording_gate import batch
 
@@ -93,11 +93,10 @@ class HistoryDeletionTests(unittest.IsolatedAsyncioTestCase):
             self.assertFalse(restored.deleted("other", capture.capture_id))
             restarted.close()
 
-    async def test_active_import_and_unknown_capture_fail_closed(self):
+    async def test_active_import_refuses_and_missing_legacy_receipt_allows(self):
         gate = RecordingGate()
         guard = HistoryDeletionGuard(gate, asyncio.Lock())
-        with self.assertRaisesRegex(ValueError, "not verified"):
-            guard.check("task-recordings", str(uuid4()))
+        guard.check("task-recordings", str(uuid4()))
         with guard.importing():
             with self.assertRaisesRegex(ValueError, "import"):
                 guard.check("kiro-session-history", str(uuid4()))
@@ -107,18 +106,35 @@ class HistoryDeletionTests(unittest.IsolatedAsyncioTestCase):
         gate = RecordingGate()
         guard = HistoryDeletionGuard(gate, asyncio.Lock())
         guard.mark("kiro-session-history", "previous")
+
+        async def confirmed_retained(project, session_id):
+            return True
+
         with self.assertRaisesRegex(RuntimeError, "database failure"):
-            async with guard.deleting():
+            async with guard.deleting(confirmed_retained):
                 guard.mark("kiro-session-history", "previous")
                 guard.mark("kiro-session-history", "failed")
                 raise RuntimeError("database failure")
         self.assertTrue(guard.deleted("kiro-session-history", "previous"))
         self.assertFalse(guard.deleted("kiro-session-history", "failed"))
 
+    async def test_cancellation_retains_marker_even_when_primary_read_sees_original_row(self):
+        guard = HistoryDeletionGuard(RecordingGate(), asyncio.Lock())
+
+        async def still_visible(project, session_id):
+            return True
+
+        with self.assertRaises(asyncio.CancelledError):
+            async with guard.deleting(still_visible):
+                guard.mark("kiro-session-history", "shielded-commit")
+                raise asyncio.CancelledError()
+        self.assertTrue(guard.deleted("kiro-session-history", "shielded-commit"))
+
 
 class HistoryStorageTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
         self.directory = tempfile.TemporaryDirectory()
+        self.expected = {}
         self.engine = aio_sqlite_engine(
             URL.create(
                 "sqlite+aiosqlite", database=str(Path(self.directory.name) / "phoenix.sqlite3")
@@ -151,6 +167,93 @@ class HistoryStorageTests(unittest.IsolatedAsyncioTestCase):
         self.client = httpx.AsyncClient(
             transport=httpx.ASGITransport(app=self.app), base_url="http://127.0.0.1"
         )
+
+    async def test_reused_row_id_never_deletes_a_new_session(self):
+        old = str(uuid4())
+        gid = await self.add_session(old, "7")
+        async with self.db() as session:
+            await session.execute(delete(models.ProjectSession))
+        newer = str(uuid4())
+        new_gid = await self.add_session(newer, "8")
+        self.assertEqual(gid, new_gid, "fixture must actually reuse the numeric row identity")
+        response = await self.client.delete(
+            "/v1/sessions/" + gid,
+            params={
+                "expected_session_id": old,
+                "expected_project_name": "kiro-session-history",
+            },
+        )
+        self.assertEqual(response.status_code, 409)
+        self.assertEqual((await self.client.get("/v1/sessions/" + new_gid)).status_code, 200)
+
+    async def test_reused_row_id_in_unrelated_project_is_protected(self):
+        old = str(uuid4())
+        gid = await self.add_session(old, "7")
+        async with self.db() as session:
+            await session.execute(delete(models.ProjectSession))
+        new_gid = await self.add_session(str(uuid4()), "8", project="protected-project")
+        self.assertEqual(gid, new_gid)
+        response = await self.client.delete(
+            "/v1/sessions/" + gid,
+            params={
+                "expected_session_id": old,
+                "expected_project_name": "kiro-session-history",
+            },
+        )
+        self.assertEqual(response.status_code, 409)
+        self.assertEqual((await self.client.get("/v1/sessions/" + new_gid)).status_code, 200)
+
+    async def test_commit_applied_then_error_never_allows_pending_replay(self):
+        raw_id = str(uuid4())
+        gid = await self.add_session(raw_id, "9")
+        otlp = OtlpSpan(
+            trace_id=bytes.fromhex("9" * 32),
+            span_id=bytes.fromhex("9" * 16),
+            name="pending replay",
+            start_time_unix_nano=1_000_000_000,
+            end_time_unix_nano=2_000_000_000,
+        )
+        otlp.attributes.add(key="session.id").value.string_value = raw_id
+        await self.inserter._enqueue_span(decode_otlp_span(otlp), "kiro-session-history")
+
+        @asynccontextmanager
+        async def commit_then_error():
+            async with self.db() as session:
+                yield session
+            raise OSError("COMMIT applied but connection failed")
+
+        self.app.state.db = DbSessionFactory(commit_then_error, "sqlite")
+        try:
+            with self.assertRaisesRegex(OSError, "COMMIT applied"):
+                await self.delete_history(gid)
+        finally:
+            self.app.state.db = self.db
+        await self.inserter._insert_spans(1)
+        self.assertEqual((await self.client.get("/v1/sessions/" + gid)).status_code, 404)
+
+    async def test_confirmed_primary_rollback_removes_new_marker(self):
+        raw_id = str(uuid4())
+        gid = await self.add_session(raw_id, "b")
+        calls = 0
+
+        @asynccontextmanager
+        async def rollback_once():
+            nonlocal calls
+            calls += 1
+            first = calls == 1
+            async with self.db() as session:
+                yield session
+                if first:
+                    raise OSError("rolled back before COMMIT")
+
+        self.app.state.db = DbSessionFactory(rollback_once, "sqlite")
+        try:
+            with self.assertRaisesRegex(OSError, "rolled back"):
+                await self.delete_history(gid)
+        finally:
+            self.app.state.db = self.db
+        self.assertFalse(self.guard.deleted("kiro-session-history", raw_id))
+        self.assertEqual((await self.client.get("/v1/sessions/" + gid)).status_code, 200)
 
     async def asyncTearDown(self):
         await self.client.aclose()
@@ -209,14 +312,25 @@ class HistoryStorageTests(unittest.IsolatedAsyncioTestCase):
                 )
             )
             await session.commit()
-            return str(GlobalID("ProjectSession", str(s.id)))
+            gid = str(GlobalID("ProjectSession", str(s.id)))
+            self.expected[gid] = {
+                "expected_session_id": session_id,
+                "expected_project_name": project,
+            }
+            return gid
+
+    async def delete_history(self, gid):
+        return await self.client.delete("/v1/sessions/" + gid, params=self.expected[gid])
 
     async def test_http_delete_cascades_and_pending_replay_cannot_recreate(self):
         target, keep = str(uuid4()), str(uuid4())
         target_gid = await self.add_session(target, "1")
         keep_gid = await self.add_session(keep, "2")
         capabilities = await self.client.get("/v1/recordings/history/capabilities")
-        self.assertEqual(capabilities.json(), {"version": 1, "permanent_session_delete": True})
+        self.assertEqual(
+            capabilities.json(),
+            {"version": 1, "permanent_session_delete": True, "stable_identity_delete": True},
+        )
         span = OtlpSpan(
             trace_id=bytes.fromhex("1" * 32),
             span_id=bytes.fromhex("1" * 16),
@@ -228,7 +342,7 @@ class HistoryStorageTests(unittest.IsolatedAsyncioTestCase):
         decoded = decode_otlp_span(span)
         # This span is admitted before the DELETE but written afterwards.
         await self.inserter._enqueue_span(decoded, "kiro-session-history")
-        response = await self.client.delete("/v1/sessions/" + target_gid)
+        response = await self.delete_history(target_gid)
         self.assertEqual(response.status_code, 204, response.text)
         await self.inserter._insert_spans(1)
         self.assertEqual((await self.client.get("/v1/sessions/" + target_gid)).status_code, 404)
@@ -244,9 +358,26 @@ class HistoryStorageTests(unittest.IsolatedAsyncioTestCase):
     async def test_http_active_import_refuses_without_changing_storage(self):
         gid = await self.add_session(str(uuid4()), "3")
         with self.guard.importing():
-            response = await self.client.delete("/v1/sessions/" + gid)
+            response = await self.delete_history(gid)
         self.assertEqual(response.status_code, 409)
         self.assertEqual((await self.client.get("/v1/sessions/" + gid)).status_code, 200)
+
+    async def test_legacy_recording_without_ledger_receipt_deletes_and_replay_stays_blocked(self):
+        raw_id = str(uuid4())
+        gid = await self.add_session(raw_id, "a", project="task-recordings")
+        otlp = OtlpSpan(
+            trace_id=bytes.fromhex("a" * 32),
+            span_id=bytes.fromhex("a" * 16),
+            name="legacy replay",
+            start_time_unix_nano=1_000_000_000,
+            end_time_unix_nano=2_000_000_000,
+        )
+        otlp.attributes.add(key="session.id").value.string_value = raw_id
+        await self.inserter._enqueue_span(decode_otlp_span(otlp), "task-recordings")
+        response = await self.delete_history(gid)
+        self.assertEqual(response.status_code, 204, response.text)
+        await self.inserter._insert_spans(1)
+        self.assertEqual((await self.client.get("/v1/sessions/" + gid)).status_code, 404)
 
     async def test_http_bulk_delete_cannot_bypass_managed_guard(self):
         gid = await self.add_session(str(uuid4()), "4")
@@ -259,7 +390,7 @@ class HistoryStorageTests(unittest.IsolatedAsyncioTestCase):
     async def test_http_server_owned_queue_blocks_import_history_deletion(self):
         gid = await self.add_session(str(uuid4()), "5")
         self.app.state.kiro_session_queue = SimpleNamespace(active=True)
-        response = await self.client.delete("/v1/sessions/" + gid)
+        response = await self.delete_history(gid)
         self.assertEqual(response.status_code, 409)
         self.assertEqual((await self.client.get("/v1/sessions/" + gid)).status_code, 200)
 
@@ -286,7 +417,7 @@ class HistoryStorageTests(unittest.IsolatedAsyncioTestCase):
         )
         gid = await self.add_session(receipt.capture_id, "6", project="task-recordings")
         with patch.object(self.gate, "finish_history_deletion", side_effect=OSError("busy ledger")):
-            response = await self.client.delete("/v1/sessions/" + gid)
+            response = await self.delete_history(gid)
         self.assertEqual(response.status_code, 503)
         self.assertIn("receipt cleanup is pending", response.text)
         self.assertEqual((await self.client.get("/v1/sessions/" + gid)).status_code, 404)
@@ -296,3 +427,31 @@ class HistoryStorageTests(unittest.IsolatedAsyncioTestCase):
         self.gate = RecordingGate(ledger_path=Path(self.directory.name) / "receipts.sqlite3")
         with self.assertRaises(KeyError):
             self.gate.status(owner, receipt.capture_id)
+        self.guard = HistoryDeletionGuard(self.gate, self.inserter.history_lock)
+        await self.guard.recover(self.db)
+        self.assertEqual(self.gate.pending_history_cleanups(), ())
+
+    async def test_restart_does_not_purge_receipt_when_primary_delete_was_not_committed(self):
+        owner = ConversationKey("codex", str(uuid4()))
+        receipt = self.gate.start(owner, "pending delete", str(uuid4()))
+        self.gate.stop(owner, receipt.capture_id)
+        self.gate.complete_drain(
+            receipt.capture_id,
+            SimpleNamespace(
+                persisted_span_keys=set(),
+                storage="verified",
+                gaps=(),
+                project_relay_id=None,
+                session_relay_id=None,
+            ),
+        )
+        gid = await self.add_session(receipt.capture_id, "c", project="task-recordings")
+        self.guard.mark("task-recordings", receipt.capture_id)
+        self.gate.close()
+        self.gate = RecordingGate(ledger_path=Path(self.directory.name) / "receipts.sqlite3")
+        self.guard = HistoryDeletionGuard(self.gate, self.inserter.history_lock)
+        await self.guard.recover(self.db)
+        self.assertEqual(
+            self.gate.pending_history_cleanups(), (("task-recordings", receipt.capture_id),)
+        )
+        self.assertEqual((await self.client.get("/v1/sessions/" + gid)).status_code, 200)

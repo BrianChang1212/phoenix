@@ -252,18 +252,43 @@ async def delete_session(
     session_identifier: str = Path(
         description="The session identifier: either a GlobalID or user-provided session_id string.",
     ),
+    expected_session_id: Optional[str] = Query(default=None),
+    expected_project_name: Optional[str] = Query(default=None),
 ) -> None:
     guard = getattr(request.app.state, "history_deletion_guard", None)
+
+    async def retained(project: str, raw_id: str) -> bool:
+        row_id = _parse_session_global_id(session_identifier)
+        async with request.app.state.db() as session:
+            return (
+                await session.scalar(
+                    select(models.ProjectSession.id)
+                    .join(models.Project, models.Project.id == models.ProjectSession.project_id)
+                    .where(
+                        models.ProjectSession.id == row_id,
+                        models.Project.name == project,
+                        models.ProjectSession.session_id == raw_id,
+                    )
+                )
+                is not None
+            )
+
     try:
-        async with guard.deleting() if guard else nullcontext():
-            project_id = await _delete_session(request, session_identifier, guard)
+        async with guard.deleting(retained) if guard else nullcontext():
+            project_id = await _delete_session(
+                request, session_identifier, guard, expected_session_id, expected_project_name
+            )
     except HistoryCleanupPending as error:
         raise HTTPException(503, str(error)) from error
     request.state.event_queue.put(SpanDeleteEvent((project_id,)))
 
 
 async def _delete_session(
-    request: Request, session_identifier: str, guard: Optional[HistoryDeletionGuard]
+    request: Request,
+    session_identifier: str,
+    guard: Optional[HistoryDeletionGuard],
+    expected_session_id: Optional[str],
+    expected_project_name: Optional[str],
 ) -> int:
     row_id = _parse_session_global_id(session_identifier)
     async with request.app.state.db() as session:
@@ -286,6 +311,12 @@ async def _delete_session(
             ).all()
             queue = getattr(request.app.state, "kiro_session_queue", None)
             for project_name, session_id in rows:
+                if (
+                    project_name in MANAGED_PROJECTS
+                    or expected_session_id is not None
+                    or expected_project_name is not None
+                ) and (session_id != expected_session_id or project_name != expected_project_name):
+                    raise HTTPException(409, "History target changed; refresh and confirm it again")
                 if project_name not in MANAGED_PROJECTS:
                     continue
                 try:
