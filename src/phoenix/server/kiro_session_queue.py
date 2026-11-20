@@ -72,7 +72,9 @@ class KiroSessionQueue:
                 return existing.status()
             del self._jobs[key]
         if len(self._jobs) >= self._max_jobs:
-            terminal = next((k for k, job in self._jobs.items() if job.state not in ACTIVE_STATES), None)
+            terminal = next(
+                (k for k, job in self._jobs.items() if job.state not in ACTIVE_STATES), None
+            )
             if terminal is None:
                 raise RuntimeError("Session queue capacity reached")
             del self._jobs[terminal]
@@ -80,6 +82,10 @@ class KiroSessionQueue:
         self._jobs[key] = job
         job.task = loop.create_task(self._run(job))
         return job.status()
+
+    @property
+    def active(self) -> bool:
+        return any(job.state in ACTIVE_STATES for job in self._jobs.values())
 
     def status(self, session_id: str, turn_id: str) -> Optional[dict[str, Any]]:
         job = self._jobs.get((session_id, turn_id))
@@ -94,7 +100,9 @@ class KiroSessionQueue:
                 remaining = min(job.idle_deadline, job.hard_deadline) - loop.time()
                 if remaining <= 0:
                     raise _DeadlineExceeded
-                done, _ = await asyncio.wait({operation}, timeout=min(self._retry_interval, remaining))
+                done, _ = await asyncio.wait(
+                    {operation}, timeout=min(self._retry_interval, remaining)
+                )
                 if done:
                     return operation.result()
         finally:
@@ -144,7 +152,9 @@ class KiroSessionQueue:
                             and coverage.get("complete") is True
                         ):
                             job.state, job.error = "completed", None
-                        elif gaps or isinstance(coverage, dict) and coverage.get("complete") is False:
+                        elif (
+                            gaps or isinstance(coverage, dict) and coverage.get("complete") is False
+                        ):
                             job.state, job.error = "incomplete", None
                         else:
                             job.state, job.error = "failed", "invalid_import_receipt"

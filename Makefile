@@ -324,6 +324,16 @@ test-kiro-session-history: ## Verify complete Kiro Session import and coverage
 test-recording-gate: ## Verify the local recording receiver contract
 	@$(SESSION_FRONTEND_PYTHON) -c "import os, pathlib, subprocess, sys; source = str(pathlib.Path('src').resolve()); sys.exit(subprocess.call([sys.executable, '-m', 'unittest', 'discover', '-s', 'scripts/tests', '-p', 'test_recording*.py'], env=dict(os.environ, PYTHONPATH=source)))"
 
+test-history-deletion: ## Verify managed history deletion and isolated SQLite cascade
+	@$(SESSION_FRONTEND_PYTHON) -c "import os, pathlib, subprocess, sys; source = str(pathlib.Path('src').resolve()); sys.exit(subprocess.call([sys.executable, '-m', 'unittest', 'discover', '-s', 'scripts/tests', '-p', 'test_history_deletion.py'], env=dict(os.environ, PYTHONPATH=source)))"
+
+HISTORY_DELETION_FILES := src/phoenix/server/history_deletion.py src/phoenix/server/recording.py src/phoenix/server/kiro_session_queue.py src/phoenix/server/app.py src/phoenix/server/api/routers/v1/recordings.py src/phoenix/server/api/routers/v1/sessions.py src/phoenix/db/bulk_inserter.py scripts/tests/test_history_deletion.py
+HISTORY_DELETION_RUFF ?= $(UV) run ruff
+
+check-history-deletion: ## Check managed history deletion formatting and lint
+	@$(HISTORY_DELETION_RUFF) check $(HISTORY_DELETION_FILES)
+	@$(HISTORY_DELETION_RUFF) format --check $(HISTORY_DELETION_FILES)
+
 RECORDING_GATE_FILES := src/phoenix/server/recording.py src/phoenix/server/recording_readback.py src/phoenix/server/api/routers/v1/recordings.py src/phoenix/server/api/routers/v1/traces.py src/phoenix/server/api/routers/v1/__init__.py src/phoenix/server/app.py src/phoenix/server/grpc_server.py src/phoenix/db/bulk_inserter.py src/phoenix/server/prometheus.py
 RECORDING_GATE_TESTS := scripts/tests/test_recording_gate.py scripts/tests/test_recording_readback.py tests/unit/db/test_bulk_inserter.py
 

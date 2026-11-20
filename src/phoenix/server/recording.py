@@ -1,3 +1,4 @@
+import hashlib
 import json
 import os
 import sqlite3
@@ -198,6 +199,14 @@ class _RecordingLedger:
         self._db.execute(
             "CREATE TABLE IF NOT EXISTS metadata (key TEXT PRIMARY KEY, value TEXT NOT NULL)"
         )
+        self._db.execute(
+            "CREATE TABLE IF NOT EXISTS deleted_history ("
+            "project TEXT NOT NULL, session_id TEXT NOT NULL, PRIMARY KEY(project, session_id))"
+        )
+        self._db.execute(
+            "CREATE TABLE IF NOT EXISTS deleted_recording_commands (command_hash TEXT PRIMARY KEY)"
+        )
+        self._db.commit()
         if binding_id:
             row = self._db.execute(
                 "SELECT value FROM metadata WHERE key='database_binding'"
@@ -231,6 +240,38 @@ class _RecordingLedger:
                         capture_id,
                     ),
                 )
+
+    def deleted_history(self) -> set[tuple[str, str]]:
+        return set(self._db.execute("SELECT project, session_id FROM deleted_history"))
+
+    def mark_history_deleted(self, project: str, session_id: str) -> None:
+        with self._db:
+            self._db.execute(
+                "INSERT OR IGNORE INTO deleted_history(project, session_id) VALUES (?, ?)",
+                (project, session_id),
+            )
+
+    def unmark_history_deleted(self, project: str, session_id: str) -> None:
+        with self._db:
+            self._db.execute(
+                "DELETE FROM deleted_history WHERE project=? AND session_id=?",
+                (project, session_id),
+            )
+
+    def deleted_recording_commands(self) -> set[str]:
+        return {
+            row[0]
+            for row in self._db.execute("SELECT command_hash FROM deleted_recording_commands")
+        }
+
+    def forget_capture(self, capture_id: str, command_hash: str) -> None:
+        with self._db:
+            self._db.execute(
+                "INSERT OR IGNORE INTO deleted_recording_commands(command_hash) VALUES (?)",
+                (command_hash,),
+            )
+            self._db.execute("DELETE FROM span_keys WHERE capture_id=?", (capture_id,))
+            self._db.execute("DELETE FROM captures WHERE capture_id=?", (capture_id,))
 
     def load(self) -> tuple[dict[str, _Capture], dict[tuple[ConversationKey, str], _Capture]]:
         captures: dict[str, _Capture] = {}
@@ -451,6 +492,12 @@ class RecordingGate:
         self._timeline_origin = timeline_origin.rstrip("/")
         self._ledger = _RecordingLedger(ledger_path, database_binding) if ledger_path else None
         self._captures, self._commands = self._ledger.load() if self._ledger else ({}, {})
+        self._deleted_history = self._ledger.deleted_history() if self._ledger else set()
+        self._deleted_commands = (
+            self._ledger.deleted_recording_commands() if self._ledger else set()
+        )
+        for project, session_id in self._deleted_history:
+            self.finish_history_deletion(project, session_id)
         self._active: dict[ConversationKey, _Capture] = {}
         self._readback_attempted = {
             capture.capture_id
@@ -464,6 +511,50 @@ class RecordingGate:
         self.receiver_gaps: dict[str, int] = {}
         self._lifetimes: dict[str, BoundLifetime] = {}
 
+    def check_history_deletion(self, capture_id: str) -> None:
+        if self.history_deleted(RECORDING_PROJECT, capture_id):
+            return
+        capture = self._captures.get(capture_id)
+        if capture is None or capture.storage != "verified":
+            if capture is not None and capture.state in ("recording", "draining"):
+                raise ValueError("Capture is still recording or draining")
+            raise ValueError("Capture storage is not verified; recheck it before deletion")
+        if capture.state in ("recording", "draining"):
+            raise ValueError("Capture is still recording or draining")
+
+    def mark_history_deleted(self, project: str, session_id: str) -> None:
+        if self._ledger:
+            self._ledger.mark_history_deleted(project, session_id)
+        self._deleted_history.add((project, session_id))
+
+    @property
+    def history_deletion_persistent(self) -> bool:
+        return self._ledger is not None
+
+    def unmark_history_deleted(self, project: str, session_id: str) -> None:
+        if self._ledger:
+            self._ledger.unmark_history_deleted(project, session_id)
+        self._deleted_history.discard((project, session_id))
+
+    def history_deleted(self, project: str, session_id: str) -> bool:
+        return (project, session_id) in self._deleted_history
+
+    @staticmethod
+    def _command_hash(owner: ConversationKey, request_id: str) -> str:
+        return hashlib.sha256(
+            f"{owner.source}\0{owner.conversation_id}\0{request_id}".encode()
+        ).hexdigest()
+
+    def finish_history_deletion(self, project: str, session_id: str) -> None:
+        if project != RECORDING_PROJECT or (capture := self._captures.get(session_id)) is None:
+            return
+        command_hash = self._command_hash(capture.owner, capture.request_id)
+        if self._ledger:
+            self._ledger.forget_capture(session_id, command_hash)
+        self._deleted_commands.add(command_hash)
+        del self._captures[session_id]
+        self._commands.pop((capture.owner, capture.request_id), None)
+
     def start(
         self,
         owner: ConversationKey,
@@ -475,6 +566,8 @@ class RecordingGate:
         if not task.strip() or len(task) > 200:
             raise ValueError("Task name must contain 1 to 200 characters")
         UUID(request_id)
+        if self._command_hash(owner, request_id) in self._deleted_commands:
+            raise ValueError("This recording request was permanently deleted")
         if previous := self._commands.get((owner, request_id)):
             if previous.task != task:
                 raise ValueError("Request ID was already used for another task")
@@ -546,6 +639,8 @@ class RecordingGate:
     def status(
         self, owner: ConversationKey, capture_id: Optional[str] = None
     ) -> Optional[CaptureReceipt]:
+        if capture_id and self.history_deleted(RECORDING_PROJECT, capture_id):
+            raise KeyError("Recording was permanently deleted")
         capture = self._captures[capture_id] if capture_id else self._active.get(owner)
         if capture is None:
             return None

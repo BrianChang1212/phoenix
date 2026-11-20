@@ -1294,6 +1294,12 @@ def create_app(
                     "PHOENIX_RECORDING_ORIGIN", f"http://127.0.0.1:{get_env_port()}"
                 ),
             )
+    if (gate := getattr(app.state, "recording_gate", None)) is not None:
+        from phoenix.server.history_deletion import HistoryDeletionGuard
+
+        guard = HistoryDeletionGuard(gate, bulk_inserter.history_lock)
+        bulk_inserter.history_guard = guard
+        app.state.history_deletion_guard = guard
     app.include_router(create_v1_router(authentication_enabled))
     app.include_router(create_client_errors_router(authentication_enabled))
     if not get_env_disable_agent_assistant():

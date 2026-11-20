@@ -1,11 +1,12 @@
+from contextlib import nullcontext
 from dataclasses import asdict
 from ipaddress import ip_address
 from typing import Any, Literal, Optional
 
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, ConfigDict, Field
-from starlette.requests import Request
 from starlette.concurrency import run_in_threadpool
+from starlette.requests import Request
 
 from phoenix.server.recording import ConversationKey, RecordingGate
 from phoenix.server.recording_lifetime import LifetimeBinding, validate_local_binding
@@ -109,8 +110,22 @@ async def stop_recording(body: StopRecording, request: Request) -> dict[str, Any
         raise HTTPException(404, "Recording not found for this conversation") from error
 
 
+@router.get("/recordings/history/capabilities")
+async def history_deletion_capabilities(request: Request) -> dict[str, Any]:
+    _gate(request)
+    guard = getattr(request.app.state, "history_deletion_guard", None)
+    enabled = guard is not None and guard.gate.history_deletion_persistent
+    return {"version": 1, "permanent_session_delete": enabled}
+
+
 @router.post("/recordings/kiro-session/import")
 async def import_kiro_session(body: ImportKiroSession, request: Request) -> dict[str, Any]:
+    guard = getattr(request.app.state, "history_deletion_guard", None)
+    with guard.importing() if guard else nullcontext():
+        return await _import_kiro_session(body, request)
+
+
+async def _import_kiro_session(body: ImportKiroSession, request: Request) -> dict[str, Any]:
     """Import an explicitly selected local transcript, separately from live captures."""
     _gate(request)
     from phoenix.server.api.routers.v1.traces import _add_spans
@@ -119,21 +134,27 @@ async def import_kiro_session(body: ImportKiroSession, request: Request) -> dict
 
     try:
         snapshot = await run_in_threadpool(
-            load_snapshot, body.session_id,
+            load_snapshot,
+            body.session_id,
             **({"through_turn_id": body.through_turn_id} if body.through_turn_id else {}),
         )
         imported = await run_in_threadpool(build_import, snapshot)
     except (OSError, ValueError) as error:
         raise HTTPException(409, "Cannot import this local Kiro Session snapshot") from error
+    guard = getattr(request.app.state, "history_deletion_guard", None)
+    if guard and guard.deleted(PROJECT, imported.import_id):
+        raise HTTPException(409, "This Kiro Session snapshot was permanently deleted")
     # Only server-generated spans from the validated local source enter this path.
     # The public OTLP route continues to enforce the normal live RecordingGate.
     await _add_spans(imported.request, request.state, PROJECT, recording_enabled=False)
     gaps = set(imported.gaps)
     try:
         readback = await settle_recording_spans(
-            request.app.state.db, capture_id=imported.import_id,
-            expected_span_keys=imported.expected_span_keys, project_name=PROJECT,
-            # Ingestion runs near 160 spans/s, so the readback window grows with the import instead of a fixed 5 s.
+            request.app.state.db,
+            capture_id=imported.import_id,
+            expected_span_keys=imported.expected_span_keys,
+            project_name=PROJECT,
+            # The readback window grows with the import at roughly 160 spans/s.
             timeout_sec=min(60.0, 5.0 + len(imported.expected_span_keys) / 100),
         )
     except (OSError, RuntimeError, TimeoutError):
@@ -153,14 +174,20 @@ async def import_kiro_session(body: ImportKiroSession, request: Request) -> dict
             f"/sessions/{quote(readback.session_relay_id, safe='')}?sessionView=timeline"
         )
     return {
-        "mode": "session_transcript", "state": "imported" if not gaps else "incomplete",
-        "source_session_id": body.session_id, "import_id": imported.import_id,
-        "task": body.task, "source_sha256": snapshot.sha256,
+        "mode": "session_transcript",
+        "state": "imported" if not gaps else "incomplete",
+        "source_session_id": body.session_id,
+        "import_id": imported.import_id,
+        "task": body.task,
+        "source_sha256": snapshot.sha256,
         "through_turn_id": body.through_turn_id,
         "through_record_id": imported.through_record_id,
-        "storage": storage, "expected_spans": len(imported.expected_span_keys),
-        "persisted_spans": persisted, "gaps": sorted(gaps),
-        "coverage": imported.coverage, "timeline_url": timeline_url,
+        "storage": storage,
+        "expected_spans": len(imported.expected_span_keys),
+        "persisted_spans": persisted,
+        "gaps": sorted(gaps),
+        "coverage": imported.coverage,
+        "timeline_url": timeline_url,
     }
 
 

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections import defaultdict
+from contextlib import nullcontext
 from typing import Annotated, Literal, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Path, Query
@@ -36,6 +37,11 @@ from phoenix.server.authorization import (
 )
 from phoenix.server.bearer_auth import PhoenixUser
 from phoenix.server.dml_event import ProjectSessionAnnotationInsertEvent, SpanDeleteEvent
+from phoenix.server.history_deletion import (
+    MANAGED_PROJECTS,
+    HistoryCleanupPending,
+    HistoryDeletionGuard,
+)
 from phoenix.server.session_filters import SessionFilterConditionError, apply_session_filter_to_page
 
 from .annotations import SessionAnnotationData
@@ -247,6 +253,18 @@ async def delete_session(
         description="The session identifier: either a GlobalID or user-provided session_id string.",
     ),
 ) -> None:
+    guard = getattr(request.app.state, "history_deletion_guard", None)
+    try:
+        async with guard.deleting() if guard else nullcontext():
+            project_id = await _delete_session(request, session_identifier, guard)
+    except HistoryCleanupPending as error:
+        raise HTTPException(503, str(error)) from error
+    request.state.event_queue.put(SpanDeleteEvent((project_id,)))
+
+
+async def _delete_session(
+    request: Request, session_identifier: str, guard: Optional[HistoryDeletionGuard]
+) -> int:
     row_id = _parse_session_global_id(session_identifier)
     async with request.app.state.db() as session:
         if row_id is not None:
@@ -256,6 +274,27 @@ async def delete_session(
             where_clause = models.ProjectSession.session_id == session_identifier
             error_detail = f"Session with session_id '{session_identifier}' not found"
 
+        if guard is not None:
+            rows = (
+                await session.execute(
+                    select(models.Project.name, models.ProjectSession.session_id)
+                    .join(
+                        models.ProjectSession, models.ProjectSession.project_id == models.Project.id
+                    )
+                    .where(where_clause)
+                )
+            ).all()
+            queue = getattr(request.app.state, "kiro_session_queue", None)
+            for project_name, session_id in rows:
+                if project_name not in MANAGED_PROJECTS:
+                    continue
+                try:
+                    guard.check(project_name, session_id, bool(queue and queue.active))
+                except ValueError as error:
+                    raise HTTPException(409, str(error)) from error
+                if row_id is None:
+                    raise HTTPException(409, "Managed history deletion requires a Session GlobalID")
+                guard.mark(project_name, session_id)
         delete_stmt = (
             delete(models.ProjectSession)
             .where(where_clause)
@@ -269,8 +308,7 @@ async def delete_session(
                 detail=error_detail,
             )
 
-    request.state.event_queue.put(SpanDeleteEvent((project_id,)))
-    return None
+    return project_id
 
 
 @router.post(
@@ -321,6 +359,18 @@ async def delete_sessions(
             where_clause = models.ProjectSession.id.in_(row_ids)
         else:
             where_clause = models.ProjectSession.session_id.in_(session_ids)
+
+        if getattr(request.app.state, "history_deletion_guard", None) is not None:
+            managed = await session.scalar(
+                select(models.ProjectSession.id)
+                .join(models.Project, models.Project.id == models.ProjectSession.project_id)
+                .where(where_clause, models.Project.name.in_(MANAGED_PROJECTS))
+                .limit(1)
+            )
+            if managed is not None:
+                raise HTTPException(
+                    409, "Delete managed history individually using Session GlobalIDs"
+                )
 
         delete_stmt = (
             delete(models.ProjectSession)
